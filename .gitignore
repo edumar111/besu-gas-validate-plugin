@@ -1,0 +1,37 @@
+# === OS / IDE ===
+.DS_Store
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# === Logs / temp ===
+*.log
+
+# === Java / Gradle (plugin/) ===
+plugin/build/
+plugin/.gradle/
+plugin/bin/
+plugin/out/
+# El gradle wrapper SÍ se commitea (gradle/wrapper/gradle-wrapper.{jar,properties}).
+
+# === Foundry (contracts/) ===
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+# Las deps de forge install (lib/) se reinstalan con:
+#   cd contracts && forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 \
+#                                 foundry-rs/forge-std --no-commit
+contracts/lib/
+
+# === Besu local node (node/) ===
+# Blockchain state y logs son reproducibles: el genesis define el estado inicial.
+node/data/
+node/logs/
+# El JAR del plugin se copia a node/data/plugins/ desde plugin/build/libs/ —
+# data/ está excluido arriba, así que también lo ignora indirectamente.
+
+# === Node.js (tests/e2e/) ===
+tests/e2e/node_modules/
+tests/e2e/.vitest-cache/
+tests/e2e/coverage/

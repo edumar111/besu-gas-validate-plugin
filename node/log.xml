@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="INFO">
+  <Properties>
+    <Property name="root.log.level">INFO</Property>
+    <Property name="LOG_PATTERN">%d{yyyy-MM-dd'T'HH:mm:ss.SSSZ} %p %m%n</Property>
+    <Property name="LOG_DIR">${sys:besu.logs.dir:-./logs}</Property>
+  </Properties>
+  <Appenders>
+    <RollingFile name="LogToRollingFile" fileName="${LOG_DIR}/besu.log"
+                    filePattern="${LOG_DIR}/$${date:yyyy-MM}/app-%d{MM-dd-yyyy}-%i.log.gz">
+        <PatternLayout>
+            <Pattern>%d %p %c{1.} [%t] %m%n</Pattern>
+        </PatternLayout>
+        <Policies>
+            <TimeBasedTriggeringPolicy />
+            <SizeBasedTriggeringPolicy size="10 MB"/>
+        </Policies>
+    </RollingFile>
+
+    <RollingFile name="debugLog" fileName="${LOG_DIR}/besu_debug.log"
+            filePattern="${LOG_DIR}/$${date:yyyy-MM}_debug/app-%d{MM-dd-yyyy}-%i.log">
+            <LevelRangeFilter minLevel="DEBUG" maxLevel="DEBUG" onMatch="ACCEPT" onMismatch="DENY"/>
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="10 MB" />
+            </Policies>
+            <DefaultRolloverStrategy>
+                <Delete basePath="${LOG_DIR}" maxDepth="2">
+                  <IfFileName glob="*_debug/app-*.log" />
+                  <IfLastModified age="30d" />
+                </Delete>
+            </DefaultRolloverStrategy>
+
+      </RollingFile>
+
+        <RollingFile name="infoLog" fileName="${LOG_DIR}/besu_info.log"
+            filePattern="${LOG_DIR}/$${date:yyyy-MM}_info/app-%d{MM-dd-yyyy}-%i.log" >
+            <LevelRangeFilter minLevel="INFO" maxLevel="INFO" onMatch="ACCEPT" onMismatch="DENY"/>
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="10 MB" />
+            </Policies>
+            <DefaultRolloverStrategy>
+                <Delete basePath="${LOG_DIR}" maxDepth="2">
+                  <IfFileName glob="*_info/app-*.log" />
+                  <IfLastModified age="30d" />
+                </Delete>
+            </DefaultRolloverStrategy>
+
+        </RollingFile>
+
+        <RollingFile name="errorLog" fileName="${LOG_DIR}/besu_error.log"
+            filePattern="${LOG_DIR}/$${date:yyyy-MM}_error/app-%d{MM-dd-yyyy}-%i.log" >
+            <LevelRangeFilter minLevel="ERROR" maxLevel="ERROR" onMatch="ACCEPT" onMismatch="DENY"/>
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="10 MB" />
+            </Policies>
+            <DefaultRolloverStrategy>
+                <Delete basePath="${LOG_DIR}" maxDepth="2">
+                  <IfFileName glob="*_error/app-*.log" />
+                  <IfLastModified age="30d" />
+                </Delete>
+            </DefaultRolloverStrategy>
+        </RollingFile>
+
+        <RollingFile name="traceLog" fileName="${LOG_DIR}/besu_trace.log"
+            filePattern="${LOG_DIR}/$${date:yyyy-MM}_trace/app-%d{MM-dd-yyyy}-%i.log" >
+            <LevelRangeFilter minLevel="TRACE" maxLevel="TRACE" onMatch="ACCEPT" onMismatch="DENY"/>
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="10 MB" />
+            </Policies>
+            <DefaultRolloverStrategy>
+                <Delete basePath="${LOG_DIR}" maxDepth="2">
+                  <IfFileName glob="*_trace/app-*.log" />
+                  <IfLastModified age="30d" />
+                </Delete>
+            </DefaultRolloverStrategy>
+        </RollingFile>
+
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+        </Console>
+
+  </Appenders>
+  <Loggers>
+     <!-- QBFT TRACE -->
+    <Logger name="org.hyperledger.besu.consensus.qbft" level="TRACE" additivity="false">
+      <AppenderRef ref="traceLog"/>
+    </Logger>
+    <Logger name="org.hyperledger.besu.consensus" level="TRACE" additivity="false">
+      <AppenderRef ref="traceLog"/>
+    </Logger>
+    <Root level="INFO">
+      <AppenderRef ref="Console" />
+      <AppenderRef ref="infoLog" />
+      <AppenderRef ref="debugLog" />
+      <AppenderRef ref="errorLog" />
+    </Root>
+  </Loggers>
+</Configuration>

@@ -1,0 +1,10 @@
+node_modules/
+cache/
+artifacts/
+typechain-types/
+dist/
+.env
+.registry-address
+node/data/database
+node/data/caches
+node/data/plugins

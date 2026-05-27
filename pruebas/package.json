@@ -1,0 +1,20 @@
+{
+  "name": "pruebas-deploy-basic",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Script de prueba: deploya un contrato dummy desde una cuenta registrada como BASIC en MembershipRegistry.",
+  "scripts": {
+    "predeploy:basic": "cd ../contracts && forge build",
+    "deploy:basic": "hardhat run scripts/deploy-as-basic.ts --network besuLocal",
+    "predeploy:exceed": "cd ../contracts && forge build",
+    "deploy:exceed": "hardhat run scripts/deploy-exceeding-basic-limit.ts --network besuLocal"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "dotenv": "^16.4.0",
+    "hardhat": "^2.22.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.7.0"
+  }
+}

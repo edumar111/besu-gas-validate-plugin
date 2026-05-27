@@ -1,0 +1,72 @@
+plugins {
+    id 'java-library'
+    id 'com.gradleup.shadow' version '8.3.5'
+}
+
+group = 'com.lacnet.besu'
+version = '0.1.0-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+    // Repo oficial donde Hyperledger publica los artefactos de Besu.
+    maven {
+        name = 'hyperledger-besu'
+        url = 'https://hyperledger.jfrog.io/artifactory/besu-maven'
+        content {
+            includeGroup 'org.hyperledger.besu'
+            includeGroup 'org.hyperledger.besu.internal'
+        }
+    }
+}
+
+ext {
+    // Versión publicada en Hyperledger maven. El binario local en
+    // /Users/edumar111/tools/besu-25.8.0-falcon es un build interno 25.8.0.4
+    // pero el plugin-api/datatypes publicados como 25.8.0 son binario-compatibles.
+    besuVersion = '25.8.0'
+}
+
+dependencies {
+    // API pública del plugin — provided por el runtime del nodo, NO se empaqueta.
+    compileOnly "org.hyperledger.besu:besu-plugin-api:${besuVersion}"
+    compileOnly "org.hyperledger.besu:besu-datatypes:${besuVersion}"
+    // Necesario para org.hyperledger.besu.evm.tracing.OperationTracer (referenciado por
+    // TransactionSimulationService).
+    compileOnly "org.hyperledger.besu:besu-evm:${besuVersion}"
+    // Tipos Bytes / Bytes32 que aparecen en las interfaces del plugin api.
+    compileOnly 'io.consensys.tuweni:tuweni-bytes:2.7.1'
+
+    implementation 'org.slf4j:slf4j-api:2.0.13'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testImplementation 'org.mockito:mockito-core:5.11.0'
+    testImplementation 'org.mockito:mockito-junit-jupiter:5.11.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    // En tests sí necesitamos las dependencias reales en el classpath.
+    testImplementation "org.hyperledger.besu:besu-plugin-api:${besuVersion}"
+    testImplementation "org.hyperledger.besu:besu-datatypes:${besuVersion}"
+    testImplementation "org.hyperledger.besu:besu-evm:${besuVersion}"
+    testImplementation 'io.consensys.tuweni:tuweni-bytes:2.7.1'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        showStandardStreams = false
+    }
+}
+
+shadowJar {
+    archiveClassifier.set('')
+    mergeServiceFiles()
+}
+
+build.dependsOn shadowJar
