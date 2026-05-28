@@ -87,6 +87,11 @@ BESU_OPTS="-Dratelimit.membershipContract=$(cat pruebas/.registry-address)" \
 a la JVM como flag `-D`. Mientras no borres `node/data/`, el registry persiste
 en esa addr — un solo bootstrap alcanza para todas las sesiones siguientes.
 
+> **Para `deploy:saturate` (Fase 1.6)**: los métodos RPC custom `gasMembership_*`
+> requieren que `GASMEMBERSHIP` esté en `rpc-http-api`/`rpc-ws-api` de
+> `node/config.toml` (ya está agregado). Sin eso, el cliente recibe
+> `Method not found`. Ver [`docs/06-fase-1.6-notificaciones.md`](../docs/06-fase-1.6-notificaciones.md).
+
 ## Instalación
 
 ```bash
@@ -144,6 +149,24 @@ en milisegundos. **Sin polling, sin timeout** — la decisión llega upfront.
 **Pre-condición**: la cuenta `BASIC_PK` tiene que estar ya registrada como
 BASIC. Corré `npm run deploy:basic` al menos una vez antes.
 
+### Caso de saturación per-block (Fase 1.6)
+
+```bash
+npm run deploy:saturate
+```
+
+ALICE (BASIC) manda dos `GasBurner.consumeGas` con nonces consecutivos: una de
+~350K y otra de ~300K. Sumadas superan los 500K de su cuota por bloque, así que
+**el selector** difiere la segunda un bloque (`invalidTransient`). El script
+pollea `gasMembership_getRejection` para capturar el motivo del rechazo y reporta
+en qué bloque entró cada TX. Demuestra el caso que el validator NO cubre y la
+notificación vía RPC custom.
+
+**Pre-condiciones**: `BASIC_PK` registrada como BASIC, y `GASMEMBERSHIP` en
+`rpc-http-api`/`rpc-ws-api` (ver arriba). Usa el contrato `GasBurner` porque el
+accounting per-block cuenta gas REAL consumido, no el gasLimit declarado — una
+transferencia común (21K real) no dispararía la cuota.
+
 ## Qué hace cada script
 
 ### `deploy-as-basic.ts` (caso positivo)
@@ -169,6 +192,14 @@ BASIC. Corré `npm run deploy:basic` al menos una vez antes.
 6. Imprime resultado:
    - **Excepción** → "TX RECHAZADA AL SUBMIT (esperado)" + tiempo (ms) + razón del nodo + comparación gasLimit vs límite BASIC.
    - **Deploy exitoso** (no debería pasar) → "ADMITIDA AL POOL (INESPERADO)" + sugerencias de qué revisar (probablemente el plugin no tiene el JAR con Fase 1.5).
+
+### `deploy-multi-tx-saturate-block.ts` (saturación per-block)
+
+1. Conecta a Besu, valida `chainId`, verifica que `BASIC_PK` es BASIC.
+2. Resuelve/deploya `GasBurner` con el `OWNER_PK` (WHITELISTED, sin cuota). Reusa vía `.gasburner-address`.
+3. Obtiene el nonce de ALICE y manda dos `consumeGas` back-to-back (sin esperar recibo) con nonces N y N+1: 350K y 300K.
+4. Pollea `gasMembership_getRejection(TX-B)` cada 1s (timeout 30s) hasta capturar el rechazo per-block o ver que la TX se minó.
+5. Reporta el evento de rechazo (bloque, razón, gas usado/cuota, source) y en qué bloque entró finalmente cada TX. Verifica que TX-B entró ≥1 bloque después que TX-A.
 
 ## Salida esperada
 
@@ -226,6 +257,45 @@ El validator del plugin rechazo la TX en eth_sendRawTransaction antes
 de que entre al txpool. Sin polling, sin timeout — error directo.
 ```
 
+### `deploy:saturate` (saturación per-block, esperado)
+
+```
+===========================================
+Saturación per-block: dos TX, mismo sender
+===========================================
+chainId:          650540
+Deployer (BASIC): 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
+
+Tier confirmado:  BASIC (cuota 500 000 gas/bloque)
+GasBurner:        0x59F2f1fCfE2474fD5F0b9BA1E73ca90b143Eb8d0
+
+Enviando TX-A: consumeGas(350 000) nonce=4
+  hash: 0xc5a6...
+Enviando TX-B: consumeGas(300 000) nonce=5
+  hash: 0x75dd...
+
+Polleando gasMembership_getRejection(TX-B) cada 1s...
+
+===========================================
+TX-B RECHAZADA POR EL SELECTOR (esperado)
+===========================================
+Detectado en:     2.1s desde el envío
+Bloque:           1234
+Sender:           0x3C44... (BASIC)
+Razón:            excedió límite de gas en el bloque
+Gas usado bloque: 371 000 / 500 000
+Gas TX-B:         400 000
+Source:           SELECTOR
+
+===========================================
+Resultado final
+===========================================
+TX-A minada en bloque: 1234 (gasUsed 371 234)
+TX-B minada en bloque: 1235 (gasUsed 321 045)
+
+OK: TX-B entró 1 bloque(s) después que TX-A — diferida por la cuota per-block.
+```
+
 ## Troubleshooting
 
 | Síntoma | Causa probable |
@@ -236,6 +306,8 @@ de que entre al txpool. Sin polling, sin timeout — error directo.
 | `El deploy fue rechazado` | El plugin rechazó la TX (cuenta sin tier, sin gas suficiente para el tier asignado, o block budget agotado). Verificá que el plugin esté cargado y que el setTier haya quedado. |
 | `setTier no quedo como BASIC` | El `OWNER_PK` no es realmente el owner del registry — revisá qué cuenta lo deployó. |
 | `Tier de X: NONE → asignando BASIC...` se queda colgado | El owner del registry no es WHITELISTED, entonces el plugin rechaza su `setTier` como `tier=NONE`. Bloques se producen vacíos (0 tx / 0 pending en logs de Besu). Solución: parar Besu, sacar el JAR, arrancar sin plugin, hacer `cast send <REGISTRY> setTier <OWNER_ADDR> 4` (WHITELISTED), restaurar el JAR, reiniciar. La sección "Bootstrap del registry" hace esto en el paso 5. |
+| `Method not found` al llamar `gasMembership_*` (en `deploy:saturate`) | Falta `GASMEMBERSHIP` en `rpc-http-api`/`rpc-ws-api` de `node/config.toml`, o Besu corre con un JAR viejo (sin Fase 1.6). Agregá el namespace y reiniciá Besu con el JAR nuevo. |
+| `deploy:saturate` dice "ambas entraron en el mismo bloque" | El `GasBurner` quemó menos gas del esperado (precisión ±5-10%) o la cuenta no es BASIC. Subí los targets de `consumeGas` o verificá el tier. |
 
 ## Limpieza
 

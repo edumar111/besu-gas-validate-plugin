@@ -10,11 +10,15 @@ import static org.mockito.Mockito.when;
 import com.lacnet.besu.gas.cache.TierCache;
 import com.lacnet.besu.gas.client.MembershipContractClient;
 import com.lacnet.besu.gas.config.GasMembershipConfig;
+import com.lacnet.besu.gas.events.RejectionEvent;
+import com.lacnet.besu.gas.events.RejectionEventBus;
 import com.lacnet.besu.gas.model.Tier;
 import com.lacnet.besu.gas.selector.GasMembershipTransactionSelector;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.datatypes.Hash;
 import org.hyperledger.besu.datatypes.Transaction;
 import org.hyperledger.besu.plugin.data.ProcessableBlockHeader;
 import org.hyperledger.besu.plugin.services.TransactionSimulationService;
@@ -38,6 +42,7 @@ class GasMembershipTransactionValidatorTest {
 
     private GasMembershipConfig config;
     private TierCache cache;
+    private RejectionEventBus eventBus;
     private GasMembershipTransactionValidator validator;
 
     @BeforeEach
@@ -45,7 +50,8 @@ class GasMembershipTransactionValidatorTest {
         config = GasMembershipConfig.fromProperties(Map.of(
                 GasMembershipConfig.PROP_MEMBERSHIP_CONTRACT, CONTRACT_ADDR)::get);
         cache = new TierCache(config.getTierCacheTtlBlocks());
-        validator = new GasMembershipTransactionValidator(config, client, cache, simulator);
+        eventBus = new RejectionEventBus();
+        validator = new GasMembershipTransactionValidator(config, client, cache, simulator, eventBus);
 
         lenient().when(pendingHeader.getNumber()).thenReturn(PENDING_BLOCK);
         lenient().when(simulator.simulatePendingBlockHeader()).thenReturn(pendingHeader);
@@ -55,6 +61,7 @@ class GasMembershipTransactionValidatorTest {
         Transaction tx = org.mockito.Mockito.mock(Transaction.class);
         lenient().when(tx.getSender()).thenReturn(sender);
         lenient().when(tx.getGasLimit()).thenReturn(gasLimit);
+        lenient().when(tx.getHash()).thenReturn(Hash.fromHexString("0x" + "22".repeat(32)));
         return tx;
     }
 
@@ -127,5 +134,28 @@ class GasMembershipTransactionValidatorTest {
 
         // El client.getTier debe haberse invocado UNA SOLA vez — el resto fue cache hit.
         verify(client, times(1)).getTier(ALICE);
+    }
+
+    // === Emisión al RejectionEventBus (Fase 1.6) ===
+
+    @Test
+    void rechazoEmiteEventoConSourceValidator() {
+        givenTier(ALICE, Tier.BASIC);
+        validator.validateTransaction(tx(ALICE, 500_001L), true, false);
+
+        List<RejectionEvent> events = eventBus.listBySender(ALICE, 10);
+        assertEquals(1, events.size());
+        RejectionEvent ev = events.get(0);
+        assertEquals(GasMembershipTransactionSelector.REASON_TX_EXCEEDS_TIER_QUOTA, ev.reason());
+        assertEquals(RejectionEvent.Source.VALIDATOR, ev.source());
+        assertEquals(0L, ev.blockNumber(), "el validator no tiene block context");
+    }
+
+    @Test
+    void txValidaNoEmiteEvento() {
+        givenTier(ALICE, Tier.BASIC);
+        validator.validateTransaction(tx(ALICE, 400_000L), true, false);
+        assertTrue(eventBus.listBySender(ALICE, 10).isEmpty(),
+                "una TX que pasa el validator no debe emitir rechazo");
     }
 }

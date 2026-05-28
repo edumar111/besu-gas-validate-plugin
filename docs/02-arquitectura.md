@@ -75,6 +75,9 @@ plugin/
     │   │   ├── client/MembershipContractClient.java  ← eth_call → Tier
     │   │   ├── cache/TierCache.java             ← Map<Address,Tier> + TTL bloques
     │   │   ├── tracker/BlockGasTracker.java     ← gas/sender por bloque
+    │   │   ├── events/                                               ← Fase 1.6
+    │   │   │   ├── RejectionEvent.java          ← record del rechazo (incl. Source)
+    │   │   │   └── RejectionEventBus.java       ← cache TTL+bounded de rechazos
     │   │   ├── selector/
     │   │   │   ├── GasMembershipTransactionSelector.java        ← decisión al armar bloque
     │   │   │   └── GasMembershipTransactionSelectorFactory.java ← devuelve selectors
@@ -84,7 +87,7 @@ plugin/
     │   └── resources/META-INF/services/
     │       └── org.hyperledger.besu.plugin.BesuPlugin   ← SPI: 1 línea con FQN
     └── test/java/com/lacnet/besu/gas/                   ← espejo de main/
-        └── (69 tests JUnit 5 + Mockito)
+        └── (82 tests JUnit 5 + Mockito)
 ```
 
 ---
@@ -104,11 +107,13 @@ Implementa `org.hyperledger.besu.plugin.BesuPlugin`. Es lo que Besu descubre por
      - `TransactionSimulationService` (para `eth_call` interno).
      - `TransactionSelectionService` (para registrar el selector factory).
      - `TransactionPoolValidatorService` (para registrar el validator factory — Fase 1.5).
+     - `RpcEndpointService` (para registrar los métodos `gasMembership_*` — Fase 1.6).
      - Si cualquiera no está disponible → `IllegalStateException` con mensaje preciso.
-   - Construye el grafo: `MembershipContractClient` + `TierCache` + `BlockGasTracker` + selector factory + validator factory. **`TierCache` se comparte entre selector y validator** — un solo lookup al contrato por `(sender, bloque)` sirve a ambos puntos de decisión.
-   - Registra ambos factories:
+   - Construye el grafo: `MembershipContractClient` + `TierCache` + `BlockGasTracker` + `RejectionEventBus` + selector factory + validator factory. **`TierCache` y `RejectionEventBus` se comparten entre selector y validator** — un solo lookup al contrato por `(sender, bloque)` sirve a ambos, y ambos escriben los rechazos al mismo bus.
+   - Registra factories y métodos RPC:
      - `selection.registerPluginTransactionSelectorFactory(selectorFactory)`
      - `validation.registerPluginTransactionValidatorFactory(validatorFactory)`
+     - `rpc.registerRPCEndpoint("gasMembership", "getRejection", ...)` y `"listRejectionsBySender"` (ver [`06-fase-1.6-notificaciones.md`](./06-fase-1.6-notificaciones.md)).
 2. `start()`, `stop()` — solo logs informativos. Todo el cableado vive en `register`.
 
 **Diseño clave — fail-fast en arranque**: si la config está mal (falta el contractAddress,
@@ -602,7 +607,7 @@ Si NO ves estos mensajes, el plugin no se cargó — ver
 
 ## 7. Tests unitarios
 
-**69 tests totales**, organizados por componente:
+**82 tests totales**, organizados por componente:
 
 | Test class | Tests | Foco |
 |---|---|---|
@@ -611,9 +616,10 @@ Si NO ves estos mensajes, el plugin no se cargó — ver
 | `MembershipContractClientTest` | 8 | Decodificación de los 5 tiers, 4 modos de fallo → NONE, ABI encoding correcto |
 | `TierCacheTest` | 12 | TTL boundary, hit/miss, **anti-stampede con 20 threads** |
 | `BlockGasTrackerTest` | 8 | Reset, acumulación, **adds concurrentes 16×1000 sin pérdida** |
-| `GasMembershipTransactionSelectorTest` | 13 | Las 6 ramas del flujo + cambio de bloque + post-processing + cache hit + split de invalid vs invalidTransient |
-| `GasMembershipTransactionValidatorTest` | 7 | WHITELISTED/PREMIUM/NONE/BASIC>quota/BASIC≤quota/STANDARD>quota/cache hit (Fase 1.5) |
-| `GasMembershipPluginTest` | 8 | SPI discovery, register() happy path + 4 paths de error (incluye `TransactionPoolValidatorService` ausente) |
+| `RejectionEventBusTest` | 7 | roundtrip, sobrescritura por hash, filtro+orden por sender, clamp de limit, expiración TTL, cap por inserción (Fase 1.6) |
+| `GasMembershipTransactionSelectorTest` | 16 | Las 6 ramas del flujo + cambio de bloque + post-processing + cache hit + split invalid/transient + emisión al bus |
+| `GasMembershipTransactionValidatorTest` | 9 | WHITELISTED/PREMIUM/NONE/BASIC>quota/BASIC≤quota/STANDARD>quota/cache hit (Fase 1.5) + emisión al bus (Fase 1.6) |
+| `GasMembershipPluginTest` | 9 | SPI discovery, register() happy path + 5 paths de error (servicios ausentes) + registro de los 2 métodos RPC |
 
 ### Tests con valor especial
 
@@ -628,7 +634,7 @@ Si NO ves estos mensajes, el plugin no se cargó — ver
 ```bash
 cd plugin
 
-# Suite completa (69 tests, ~5s con caché)
+# Suite completa (82 tests, ~5s con caché)
 ./gradlew test
 
 # Una clase específica

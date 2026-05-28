@@ -4,8 +4,9 @@
 > de la cuenta emisora, leído on-chain desde un contrato `MembershipRegistry`. Diseñado para una
 > CBDC privada con gas price = 0 sobre QBFT.
 >
-> **Estado**: Fase 1 cerrada (2026-05-21) + Fase 1.5 con validator al admitir al pool
-> (2026-05-27). 69 tests Java + 22 Solidity verdes.
+> **Estado**: Fase 1 cerrada (2026-05-21) + Fase 1.5 (validator al admitir al pool) +
+> Fase 1.6 (notificaciones de rechazo vía JSON-RPC custom, 2026-05-28). 82 tests Java +
+> 22 Solidity verdes.
 
 ---
 
@@ -18,6 +19,7 @@
 | 3 | [Contratos y tests](./03-contratos.md) | `MembershipRegistry.sol` + tests Foundry. Incluye los "tripwires cross-stack" que detectan drift entre Solidity y el plugin Java. |
 | 4 | [Smoke test end-to-end](./04-smoke-test-e2e.md) | Validación E2E con `cast`: deploy del contrato, asignación de tiers, envío de TXs reales con el plugin activo. Detalla cada uno de los 8 casos cubiertos. |
 | 5 | [Fase 1.5: validator y `pruebas/`](./05-fase-1.5-validator-y-pruebas.md) | Plugins implementados (clases Java y interfaces Besu), división de responsabilidades selector/validator, cambios en el selector y `start-besu.sh`, scripts Hardhat en `pruebas/`. |
+| 6 | [Fase 1.6: notificaciones de rechazo](./06-fase-1.6-notificaciones.md) | Métodos JSON-RPC custom (`gasMembership_*`) para que el cliente sepa por qué/cuándo se rechazó una TX. `RejectionEventBus`, el gotcha del namespace en `rpc-http-api`, script de saturación per-block. |
 
 ---
 
@@ -37,10 +39,11 @@ El tier por cuenta vive on-chain en un contrato `MembershipRegistry`. El plugin 
 
 ### Roadmap
 
-| Fase | Estado | Qué enforza | Mecanismo | Punto de rechazo |
+| Fase | Estado | Qué hace | Mecanismo | Punto |
 |---|---|---|---|---|
-| **Fase 1** | **Cerrada** (commit `442195b`) | Cuota por bloque por tier | `PluginTransactionSelector` | Al armar bloque |
-| **Fase 1.5** | **Cerrada** (2026-05-27) | Casos imposibles (NONE, `txGasLimit > tierQuota`) | `PluginTransactionPoolValidator` | Al `eth_sendRawTransaction` |
+| **Fase 1** | **Cerrada** (commit `442195b`) | Enforce cuota por bloque por tier | `PluginTransactionSelector` | Al armar bloque |
+| **Fase 1.5** | **Cerrada** (2026-05-27) | Rechazo upfront de casos imposibles (NONE, `txGasLimit > tierQuota`) | `PluginTransactionPoolValidator` | Al `eth_sendRawTransaction` |
+| **Fase 1.6** | **Cerrada** (2026-05-28) | Notifica al cliente el motivo/bloque del rechazo | `RpcEndpointService` (`gasMembership_*`) | Polling del cliente |
 | Fase 2 | Pendiente | Cuota mensual on-chain | `UsageMeter.sol` + block listener | Bloqueo cuenta 5 min |
 
 Detalle de la diferencia: la cuota por bloque protege la red en tiempo real (anti-spam, fairness). La cuota mensual hace cumplir el SLA del plan pago. Son problemas distintos y se resuelven con mecanismos distintos. Ver [§ Roadmap en requisitos](./01-requisitos-y-logica.md#estrategia-en-dos-fases) y [Fase 1.5 detallada](./05-fase-1.5-validator-y-pruebas.md).
@@ -86,7 +89,7 @@ Requisitos previos (macOS):
 Verificar que todo compila y testea:
 
 ```bash
-# Java unit tests (69 tests: selector + validator + cache + tracker + client + plugin)
+# Java unit tests (82 tests: selector + validator + cache + tracker + client + bus + plugin)
 cd plugin && ./gradlew test
 
 # Solidity tests (22 tests: 18 MembershipRegistry + 4 GasBurner)
@@ -95,8 +98,8 @@ cd contracts && forge test
 # Smoke test end-to-end con cast/forge (arranca/detiene Besu dos veces, ~3 min total)
 ./node/smoke-test.sh
 
-# Scripts de prueba con Hardhat + ethers v6 (caso positivo y negativo)
-cd pruebas && npm install && npm run deploy:basic && npm run deploy:exceed
+# Scripts de prueba con Hardhat + ethers v6 (positivo, negativo, saturación per-block)
+cd pruebas && npm install && npm run deploy:basic && npm run deploy:exceed && npm run deploy:saturate
 ```
 
 Detalle de cada paso en [`04-smoke-test-e2e.md`](./04-smoke-test-e2e.md).

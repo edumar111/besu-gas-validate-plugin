@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -20,6 +21,7 @@ import java.util.ServiceLoader;
 import java.util.function.Function;
 import org.hyperledger.besu.plugin.BesuPlugin;
 import org.hyperledger.besu.plugin.ServiceManager;
+import org.hyperledger.besu.plugin.services.RpcEndpointService;
 import org.hyperledger.besu.plugin.services.TransactionPoolValidatorService;
 import org.hyperledger.besu.plugin.services.TransactionSelectionService;
 import org.hyperledger.besu.plugin.services.TransactionSimulationService;
@@ -38,6 +40,7 @@ class GasMembershipPluginTest {
     @Mock private TransactionSimulationService simulationService;
     @Mock private TransactionSelectionService selectionService;
     @Mock private TransactionPoolValidatorService validatorService;
+    @Mock private RpcEndpointService rpcEndpointService;
 
     private Function<String, String> validConfig;
 
@@ -68,20 +71,26 @@ class GasMembershipPluginTest {
                 .thenReturn(Optional.of(simulationService));
         lenient().when(serviceManager.getService(TransactionSelectionService.class))
                 .thenReturn(Optional.of(selectionService));
-        when(serviceManager.getService(TransactionPoolValidatorService.class))
+        lenient().when(serviceManager.getService(TransactionPoolValidatorService.class))
                 .thenReturn(Optional.of(validatorService));
+        when(serviceManager.getService(RpcEndpointService.class))
+                .thenReturn(Optional.of(rpcEndpointService));
 
         GasMembershipPlugin plugin = new GasMembershipPlugin(validConfig);
         plugin.register(serviceManager);
 
-        // Selector + validator factories quedaron instanciados y registrados.
+        // Selector + validator factories + bus quedaron instanciados y registrados.
         assertNotNull(plugin.factory(), "factory del selector debe quedar disponible tras register()");
         assertNotNull(plugin.validatorFactory(), "factory del validator debe quedar disponible tras register()");
+        assertNotNull(plugin.eventBus(), "el bus de rechazos debe quedar disponible tras register()");
         assertNotNull(plugin.config(), "config debe quedar cargada tras register()");
         verify(selectionService).registerPluginTransactionSelectorFactory(
                 any(GasMembershipTransactionSelectorFactory.class));
         verify(validatorService).registerPluginTransactionValidatorFactory(
                 any(GasMembershipTransactionValidatorFactory.class));
+        // Los dos métodos JSON-RPC custom se registran en el namespace gasMembership.
+        verify(rpcEndpointService).registerRPCEndpoint(eq("gasMembership"), eq("getRejection"), any());
+        verify(rpcEndpointService).registerRPCEndpoint(eq("gasMembership"), eq("listRejectionsBySender"), any());
     }
 
     @Test
@@ -121,6 +130,23 @@ class GasMembershipPluginTest {
         IllegalStateException ex = assertThrows(IllegalStateException.class,
                 () -> plugin.register(serviceManager));
         assertTrue(ex.getMessage().contains("TransactionPoolValidatorService"));
+    }
+
+    @Test
+    void register_fallaSiRpcEndpointServiceNoEstaDisponible() {
+        when(serviceManager.getService(TransactionSimulationService.class))
+                .thenReturn(Optional.of(simulationService));
+        when(serviceManager.getService(TransactionSelectionService.class))
+                .thenReturn(Optional.of(selectionService));
+        when(serviceManager.getService(TransactionPoolValidatorService.class))
+                .thenReturn(Optional.of(validatorService));
+        when(serviceManager.getService(RpcEndpointService.class))
+                .thenReturn(Optional.empty());
+
+        GasMembershipPlugin plugin = new GasMembershipPlugin(validConfig);
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> plugin.register(serviceManager));
+        assertTrue(ex.getMessage().contains("RpcEndpointService"));
     }
 
     @Test

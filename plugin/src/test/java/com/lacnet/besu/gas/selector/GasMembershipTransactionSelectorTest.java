@@ -9,11 +9,15 @@ import static org.mockito.Mockito.when;
 import com.lacnet.besu.gas.cache.TierCache;
 import com.lacnet.besu.gas.client.MembershipContractClient;
 import com.lacnet.besu.gas.config.GasMembershipConfig;
+import com.lacnet.besu.gas.events.RejectionEvent;
+import com.lacnet.besu.gas.events.RejectionEventBus;
 import com.lacnet.besu.gas.model.Tier;
 import com.lacnet.besu.gas.tracker.BlockGasTracker;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.datatypes.Hash;
 import org.hyperledger.besu.datatypes.PendingTransaction;
 import org.hyperledger.besu.datatypes.Transaction;
 import org.hyperledger.besu.plugin.data.ProcessableBlockHeader;
@@ -41,6 +45,7 @@ class GasMembershipTransactionSelectorTest {
     private GasMembershipConfig config;
     private TierCache cache;
     private BlockGasTracker tracker;
+    private RejectionEventBus eventBus;
     private GasMembershipTransactionSelector selector;
 
     @BeforeEach
@@ -50,7 +55,8 @@ class GasMembershipTransactionSelectorTest {
                 GasMembershipConfig.PROP_MEMBERSHIP_CONTRACT, CONTRACT_ADDR)::get);
         cache = new TierCache(config.getTierCacheTtlBlocks());
         tracker = new BlockGasTracker();
-        selector = new GasMembershipTransactionSelector(config, client, cache, tracker);
+        eventBus = new RejectionEventBus();
+        selector = new GasMembershipTransactionSelector(config, client, cache, tracker, eventBus);
     }
 
     /** Builder mínimo para un {@link TransactionEvaluationContext}. */
@@ -66,6 +72,8 @@ class GasMembershipTransactionSelectorTest {
         lenient().when(header.getGasLimit()).thenReturn(blockGasLimit);
         lenient().when(tx.getSender()).thenReturn(sender);
         lenient().when(tx.getGasLimit()).thenReturn(txGasLimit);
+        // Hash determinístico para los rechazos emitidos al bus (no importa el valor exacto).
+        lenient().when(tx.getHash()).thenReturn(Hash.fromHexString("0x" + "11".repeat(32)));
         lenient().when(ptx.getTransaction()).thenReturn(tx);
         when(ctx.getPendingBlockHeader()).thenReturn(header);
         when(ctx.getPendingTransaction()).thenReturn(ptx);
@@ -271,5 +279,43 @@ class GasMembershipTransactionSelectorTest {
         TransactionSelectionResult bobOk = selector.evaluateTransactionPreProcessing(
                 context(BLOCK_NUMBER, BLOCK_GAS_LIMIT, BOB, 1_000_000L));
         assertEquals(TransactionSelectionResult.SELECTED, bobOk);
+    }
+
+    // === Emisión al RejectionEventBus (Fase 1.6) ===
+
+    @Test
+    void rechazoPerBlockEmiteEventoAlBus() {
+        givenTier(ALICE, Tier.BASIC);
+        // Agotar la cuota y disparar un invalidTransient per-block.
+        selector.evaluateTransactionPreProcessing(context(BLOCK_NUMBER, BLOCK_GAS_LIMIT, ALICE, 500_000L));
+        tracker.add(ALICE, 500_000L);
+        selector.evaluateTransactionPreProcessing(context(BLOCK_NUMBER, BLOCK_GAS_LIMIT, ALICE, 1L));
+
+        List<RejectionEvent> events = eventBus.listBySender(ALICE, 10);
+        assertEquals(1, events.size());
+        RejectionEvent ev = events.get(0);
+        assertEquals(GasMembershipTransactionSelector.REASON_BLOCK_QUOTA_EXCEEDED, ev.reason());
+        assertEquals(RejectionEvent.Source.SELECTOR, ev.source());
+        assertEquals(Tier.BASIC, ev.tier());
+        assertEquals(BLOCK_NUMBER, ev.blockNumber());
+    }
+
+    @Test
+    void rechazoPermanenteEmiteEventoAlBus() {
+        givenTier(ALICE, Tier.BASIC);
+        selector.evaluateTransactionPreProcessing(context(BLOCK_NUMBER, BLOCK_GAS_LIMIT, ALICE, 500_001L));
+
+        List<RejectionEvent> events = eventBus.listBySender(ALICE, 10);
+        assertEquals(1, events.size());
+        assertEquals(GasMembershipTransactionSelector.REASON_TX_EXCEEDS_TIER_QUOTA, events.get(0).reason());
+        assertEquals(RejectionEvent.Source.SELECTOR, events.get(0).source());
+    }
+
+    @Test
+    void seleccionExitosaNoEmiteEvento() {
+        givenTier(ALICE, Tier.BASIC);
+        selector.evaluateTransactionPreProcessing(context(BLOCK_NUMBER, BLOCK_GAS_LIMIT, ALICE, 400_000L));
+        assertTrue(eventBus.listBySender(ALICE, 10).isEmpty(),
+                "una TX SELECTED no debe emitir rechazo al bus");
     }
 }

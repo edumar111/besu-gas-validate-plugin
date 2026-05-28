@@ -3,8 +3,11 @@ package com.lacnet.besu.gas.validator;
 import com.lacnet.besu.gas.cache.TierCache;
 import com.lacnet.besu.gas.client.MembershipContractClient;
 import com.lacnet.besu.gas.config.GasMembershipConfig;
+import com.lacnet.besu.gas.events.RejectionEvent;
+import com.lacnet.besu.gas.events.RejectionEventBus;
 import com.lacnet.besu.gas.model.Tier;
 import com.lacnet.besu.gas.selector.GasMembershipTransactionSelector;
+import java.time.Instant;
 import java.util.Optional;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Transaction;
@@ -47,16 +50,19 @@ public class GasMembershipTransactionValidator implements PluginTransactionPoolV
     private final MembershipContractClient client;
     private final TierCache cache;
     private final TransactionSimulationService simulator;
+    private final RejectionEventBus eventBus;
 
     public GasMembershipTransactionValidator(
             final GasMembershipConfig config,
             final MembershipContractClient client,
             final TierCache cache,
-            final TransactionSimulationService simulator) {
+            final TransactionSimulationService simulator,
+            final RejectionEventBus eventBus) {
         this.config = config;
         this.client = client;
         this.cache = cache;
         this.simulator = simulator;
+        this.eventBus = eventBus;
     }
 
     @Override
@@ -75,6 +81,7 @@ public class GasMembershipTransactionValidator implements PluginTransactionPoolV
 
         if (tier == Tier.NONE) {
             LOG.debug("Validator: rechazo sender={} tier=NONE", sender);
+            emit(transaction, sender, tier, GasMembershipTransactionSelector.REASON_NO_MEMBERSHIP, txGasLimit, 0L);
             return Optional.of(GasMembershipTransactionSelector.REASON_NO_MEMBERSHIP);
         }
 
@@ -82,11 +89,25 @@ public class GasMembershipTransactionValidator implements PluginTransactionPoolV
         if (txGasLimit > quota) {
             LOG.debug("Validator: rechazo permanente sender={} tier={} txGasLimit={} quota={}",
                     sender, tier, txGasLimit, quota);
+            emit(transaction, sender, tier, GasMembershipTransactionSelector.REASON_TX_EXCEEDS_TIER_QUOTA, txGasLimit, quota);
             return Optional.of(GasMembershipTransactionSelector.REASON_TX_EXCEEDS_TIER_QUOTA);
         }
 
         // txGasLimit ≤ quota → en principio puede caber; el selector decide.
         return Optional.empty();
+    }
+
+    private void emit(
+            final Transaction tx,
+            final Address sender,
+            final Tier tier,
+            final String reason,
+            final long txGasLimit,
+            final long quota) {
+        // El validator no tiene block context: blockNumber y usedInBlock van en 0.
+        eventBus.emit(new RejectionEvent(
+                tx.getHash(), sender, tier, reason, 0L, txGasLimit, 0L, quota,
+                Instant.now(), RejectionEvent.Source.VALIDATOR));
     }
 
     /**

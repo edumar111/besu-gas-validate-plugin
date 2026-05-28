@@ -3,9 +3,13 @@ package com.lacnet.besu.gas.selector;
 import com.lacnet.besu.gas.cache.TierCache;
 import com.lacnet.besu.gas.client.MembershipContractClient;
 import com.lacnet.besu.gas.config.GasMembershipConfig;
+import com.lacnet.besu.gas.events.RejectionEvent;
+import com.lacnet.besu.gas.events.RejectionEventBus;
 import com.lacnet.besu.gas.model.Tier;
 import com.lacnet.besu.gas.tracker.BlockGasTracker;
+import java.time.Instant;
 import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.datatypes.Hash;
 import org.hyperledger.besu.datatypes.Transaction;
 import org.hyperledger.besu.plugin.data.ProcessableBlockHeader;
 import org.hyperledger.besu.plugin.data.TransactionProcessingResult;
@@ -53,16 +57,19 @@ public class GasMembershipTransactionSelector implements PluginTransactionSelect
     private final MembershipContractClient client;
     private final TierCache cache;
     private final BlockGasTracker tracker;
+    private final RejectionEventBus eventBus;
 
     public GasMembershipTransactionSelector(
             final GasMembershipConfig config,
             final MembershipContractClient client,
             final TierCache cache,
-            final BlockGasTracker tracker) {
+            final BlockGasTracker tracker,
+            final RejectionEventBus eventBus) {
         this.config = config;
         this.client = client;
         this.cache = cache;
         this.tracker = tracker;
+        this.eventBus = eventBus;
     }
 
     @Override
@@ -84,6 +91,7 @@ public class GasMembershipTransactionSelector implements PluginTransactionSelect
 
         if (tier == Tier.NONE) {
             LOG.debug("Rechazo sender={} tier=NONE", sender);
+            emit(tx.getHash(), sender, tier, REASON_NO_MEMBERSHIP, blockNumber, txGasLimit, 0L, 0L);
             return TransactionSelectionResult.invalid(REASON_NO_MEMBERSHIP);
         }
 
@@ -107,6 +115,7 @@ public class GasMembershipTransactionSelector implements PluginTransactionSelect
             LOG.debug("PREMIUM sender={} excede tanto cuota como sobrante: "
                     + "projected={} quota={} txGasLimit={} leftover={}",
                     sender, projected, quota, txGasLimit, leftover);
+            emit(tx.getHash(), sender, tier, REASON_BLOCK_QUOTA_EXCEEDED, blockNumber, txGasLimit, used, quota);
             return TransactionSelectionResult.invalidTransient(REASON_BLOCK_QUOTA_EXCEEDED);
         }
 
@@ -115,12 +124,14 @@ public class GasMembershipTransactionSelector implements PluginTransactionSelect
         if (txGasLimit > quota) {
             LOG.debug("Rechazo permanente sender={} tier={} txGasLimit={} quota={}: TX no cabe en ningún bloque",
                     sender, tier, txGasLimit, quota);
+            emit(tx.getHash(), sender, tier, REASON_TX_EXCEEDS_TIER_QUOTA, blockNumber, txGasLimit, used, quota);
             return TransactionSelectionResult.invalid(REASON_TX_EXCEEDS_TIER_QUOTA);
         }
 
         // txGasLimit ≤ quota pero used + txGasLimit > quota → puede caber cuando se resetee el contador.
         LOG.debug("Rechazo sender={} tier={} projected={} quota={}",
                 sender, tier, projected, quota);
+        emit(tx.getHash(), sender, tier, REASON_BLOCK_QUOTA_EXCEEDED, blockNumber, txGasLimit, used, quota);
         return TransactionSelectionResult.invalidTransient(REASON_BLOCK_QUOTA_EXCEEDED);
     }
 
@@ -132,5 +143,19 @@ public class GasMembershipTransactionSelector implements PluginTransactionSelect
         long gasUsed = processingResult.getEstimateGasUsedByTransaction();
         tracker.add(sender, gasUsed);
         return TransactionSelectionResult.SELECTED;
+    }
+
+    private void emit(
+            final Hash txHash,
+            final Address sender,
+            final Tier tier,
+            final String reason,
+            final long blockNumber,
+            final long txGasLimit,
+            final long used,
+            final long quota) {
+        eventBus.emit(new RejectionEvent(
+                txHash, sender, tier, reason, blockNumber, txGasLimit, used, quota,
+                Instant.now(), RejectionEvent.Source.SELECTOR));
     }
 }

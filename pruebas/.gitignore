@@ -5,6 +5,7 @@ typechain-types/
 dist/
 .env
 .registry-address
+.gasburner-address
 node/data/database
 node/data/caches
 node/data/plugins

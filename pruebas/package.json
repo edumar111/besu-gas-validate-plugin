@@ -7,7 +7,9 @@
     "predeploy:basic": "cd ../contracts && forge build",
     "deploy:basic": "hardhat run scripts/deploy-as-basic.ts --network besuLocal",
     "predeploy:exceed": "cd ../contracts && forge build",
-    "deploy:exceed": "hardhat run scripts/deploy-exceeding-basic-limit.ts --network besuLocal"
+    "deploy:exceed": "hardhat run scripts/deploy-exceeding-basic-limit.ts --network besuLocal",
+    "predeploy:saturate": "cd ../contracts && forge build",
+    "deploy:saturate": "hardhat run scripts/deploy-multi-tx-saturate-block.ts --network besuLocal"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",

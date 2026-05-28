@@ -7,8 +7,10 @@ rpc-http-port=4545
 graphql-http-port=4547
 rpc-ws-port=4546
 
-rpc-http-api=["ADMIN","ETH","NET","WEB3","QBFT","TXPOOL","PERM","TRACE"]
-rpc-ws-api=["ADMIN","ETH","NET","WEB3","QBFT","TXPOOL","PERM","TRACE"]
+# GASMEMBERSHIP habilita los métodos custom del plugin (gasMembership_getRejection, etc.).
+# Besu matchea el namespace case-insensitive por prefijo (hasNamespace → toUpperCase + startsWith).
+rpc-http-api=["ADMIN","ETH","NET","WEB3","QBFT","TXPOOL","PERM","TRACE","GASMEMBERSHIP"]
+rpc-ws-api=["ADMIN","ETH","NET","WEB3","QBFT","TXPOOL","PERM","TRACE","GASMEMBERSHIP"]
 ## Uncomment the following lines to allow RPC from remote locations (risky)
 host-allowlist=["*"]
 rpc-http-host="0.0.0.0"

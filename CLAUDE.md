@@ -5,13 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Repository status
 
 **Fase 1 cerrada y validada end-to-end.** El plugin de gas + el contrato `MembershipRegistry` están
-implementados, testeados (69 tests Java + 22 tests Solidity verdes) y validados con un smoke test
+implementados, testeados (82 tests Java + 22 tests Solidity verdes) y validados con un smoke test
 E2E de 8/8 casos. **Fase 1.5** suma un `PluginTransactionPoolValidator` que rechaza upfront
-(en `eth_sendRawTransaction`) las TXs que nunca podrían entrar a ningún bloque.
+(en `eth_sendRawTransaction`) las TXs que nunca podrían entrar a ningún bloque. **Fase 1.6** suma
+métodos JSON-RPC custom (`gasMembership_*`) para notificar al cliente el motivo/bloque del rechazo.
 
 | Carpeta | Qué hay |
 |---|---|
-| `plugin/` | Plugin Java (Gradle 8.10.2, Java 21, Besu 25.8.0). JAR shadowed listo en `build/libs/`. Selector (Fase 1) + validator (Fase 1.5). |
+| `plugin/` | Plugin Java (Gradle 8.10.2, Java 21, Besu 25.8.0). JAR shadowed listo en `build/libs/`. Selector (Fase 1) + validator (Fase 1.5) + RPC custom (Fase 1.6). |
 | `contracts/` | `MembershipRegistry.sol` (producción) + `GasBurner.sol` (helper para tests E2E) con Foundry + OpenZeppelin 5.1.0. Submódulos en `lib/` (NO commiteados — `forge install` para reinstalar). |
 | `node/` | Besu 25.8-falcon QBFT local con `start-besu.sh` y `smoke-test.sh`. |
 | `pruebas/` | Scripts Hardhat + ethers v6 para deployar contratos desde una cuenta BASIC (`deploy:basic` caso positivo, `deploy:exceed` caso negativo que valida que el validator rechaza). Ver `pruebas/README.md`. |
@@ -58,10 +59,15 @@ TX admitida → Besu txpool → [GasMembershipTransactionSelector.evaluateTransa
                                        └── decide: SELECTED / invalid / invalidTransient
 
 Post-processing → BlockGasTracker.add(sender, gasUsed REAL)
+
+Cualquier rechazo (validator o selector) → RejectionEventBus.emit(...)
+                                              └── gasMembership_getRejection(txHash)  ← Fase 1.6
+                                              └── gasMembership_listRejectionsBySender(sender)
 ```
 
 Detalle visual y de cada componente en `docs/02-arquitectura.md`. El validator y el
-selector **comparten la misma `TierCache`** — un solo lookup al contrato sirve a ambos.
+selector **comparten la misma `TierCache` y el mismo `RejectionEventBus`** — un solo lookup al
+contrato sirve a ambos, y ambos escriben los rechazos al mismo bus que exponen los métodos RPC.
 
 ## Cosas que solo se descubren leyendo varios archivos
 
@@ -93,6 +99,12 @@ Verificado por un test Solidity (`test_GetTierSelectorMatchPluginHardcoded` en
 duplicado entre `Tier.java` y `IMembershipRegistry.sol`. Dos tests (uno por lado) verifican
 que los enums están sincronizados.
 
+**Namespace RPC custom debe habilitarse en `config.toml`** (Fase 1.6): los métodos
+`gasMembership_*` no se exponen a menos que `GASMEMBERSHIP` esté en `rpc-http-api` y
+`rpc-ws-api`. Besu matchea el namespace case-insensitive por prefijo
+(`RpcEndpointServiceImpl.hasNamespace` = `methodName.toUpperCase().startsWith(api.toUpperCase())`).
+Sin esa entrada, el cliente recibe `Method not found` aunque el plugin haya registrado el método.
+
 ## Test helpers
 
 **`contracts/src/GasBurner.sol`** — contrato auxiliar para el smoke E2E. Expone
@@ -108,7 +120,7 @@ Foundry, pero no debe deployarse en chains productivas.
 ## Comandos típicos
 
 ```bash
-# Java unit tests (69 tests: selector + validator + cache + tracker + client + plugin)
+# Java unit tests (82 tests: selector + validator + cache + tracker + client + bus + plugin)
 cd plugin && ./gradlew test
 
 # Solidity tests (22 tests: 18 MembershipRegistry + 4 GasBurner)
