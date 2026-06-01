@@ -293,7 +293,9 @@ Si en algún momento se necesita notificación realtime para este caso, hay tres
 
 Ninguno está implementado.
 
-### Fase 2 sigue pendiente
+### Fase 2 (implementada después de 1.5)
 
-Cuota mensual on-chain + bloqueo 5min. No cambia con Fase 1.5; los componentes nuevos
-(`UsageMeter.sol`, block listener, `BlockedAddressRegistry`) se agregarán encima.
+Cuota mensual on-chain + bloqueo 5 min. Construida **encima** de Fase 1.5 sin cambiarla: el
+`MonthlyQuotaGuard` se consulta en el validator (y en el selector) **antes** de la lógica per-block
+de 1.5. Componentes: `UsageMeter.sol`, `UsageBlockListener` (`BlockAddedListener`),
+`BlockedAddressRegistry`, nodo recorder. Ver [`07-fase-2-cuota-mensual.md`](./07-fase-2-cuota-mensual.md).

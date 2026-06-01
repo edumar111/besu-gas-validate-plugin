@@ -14,6 +14,7 @@ import com.lacnet.besu.gas.config.GasMembershipConfig;
 import com.lacnet.besu.gas.selector.GasMembershipTransactionSelectorFactory;
 import com.lacnet.besu.gas.validator.GasMembershipTransactionValidatorFactory;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -21,6 +22,9 @@ import java.util.ServiceLoader;
 import java.util.function.Function;
 import org.hyperledger.besu.plugin.BesuPlugin;
 import org.hyperledger.besu.plugin.ServiceManager;
+import org.hyperledger.besu.plugin.data.BlockHeader;
+import org.hyperledger.besu.plugin.services.BesuEvents;
+import org.hyperledger.besu.plugin.services.BlockchainService;
 import org.hyperledger.besu.plugin.services.RpcEndpointService;
 import org.hyperledger.besu.plugin.services.TransactionPoolValidatorService;
 import org.hyperledger.besu.plugin.services.TransactionSelectionService;
@@ -41,6 +45,9 @@ class GasMembershipPluginTest {
     @Mock private TransactionSelectionService selectionService;
     @Mock private TransactionPoolValidatorService validatorService;
     @Mock private RpcEndpointService rpcEndpointService;
+    @Mock private BesuEvents besuEvents;
+    @Mock private BlockchainService blockchainService;
+    @Mock private BlockHeader chainHeadHeader;
 
     private Function<String, String> validConfig;
 
@@ -163,5 +170,59 @@ class GasMembershipPluginTest {
         GasMembershipPlugin plugin = new GasMembershipPlugin(validConfig);
         plugin.start();
         plugin.stop();
+    }
+
+    // === Fase 2: wiring del enforcement mensual ===
+
+    private void wireBaseServices() {
+        lenient().when(serviceManager.getService(TransactionSimulationService.class))
+                .thenReturn(Optional.of(simulationService));
+        lenient().when(serviceManager.getService(TransactionSelectionService.class))
+                .thenReturn(Optional.of(selectionService));
+        lenient().when(serviceManager.getService(TransactionPoolValidatorService.class))
+                .thenReturn(Optional.of(validatorService));
+        lenient().when(serviceManager.getService(RpcEndpointService.class))
+                .thenReturn(Optional.of(rpcEndpointService));
+    }
+
+    @Test
+    void start_conBesuEvents_registraElBlockListener() {
+        wireBaseServices();
+        when(serviceManager.getService(BesuEvents.class)).thenReturn(Optional.of(besuEvents));
+        lenient().when(serviceManager.getService(BlockchainService.class))
+                .thenReturn(Optional.of(blockchainService));
+
+        GasMembershipPlugin plugin = new GasMembershipPlugin(validConfig);
+        plugin.register(serviceManager);
+        // El RPC mensual se registra en register().
+        verify(rpcEndpointService).registerRPCEndpoint(eq("gasMembership"), eq("getMonthlyUsage"), any());
+        // El block listener de Fase 2 se registra recién en start() (cuando BesuEvents está disponible).
+        plugin.start();
+        verify(besuEvents).addBlockAddedListener(any());
+    }
+
+    @Test
+    void start_sinBesuEvents_degradaAFase1() {
+        wireBaseServices();
+        when(serviceManager.getService(BesuEvents.class)).thenReturn(Optional.empty());
+
+        GasMembershipPlugin plugin = new GasMembershipPlugin(validConfig);
+        plugin.register(serviceManager);
+        // Igual registra selector + validator + RPC en register().
+        verify(selectionService).registerPluginTransactionSelectorFactory(any());
+        verify(rpcEndpointService).registerRPCEndpoint(eq("gasMembership"), eq("getMonthlyUsage"), any());
+        // start() no debe lanzar aunque BesuEvents no esté; Fase 2 queda inactiva.
+        plugin.start();
+        verify(besuEvents, org.mockito.Mockito.never()).addBlockAddedListener(any());
+    }
+
+    @Test
+    void register_recorderSinClave_falla() {
+        Map<String, String> props = new HashMap<>();
+        props.put(GasMembershipConfig.PROP_MEMBERSHIP_CONTRACT, CONTRACT_ADDR);
+        props.put(GasMembershipConfig.PROP_USAGE_RECORDER, "true");
+        // falta recorderKey / meterContract / nodeUrl → la config debe fallar eager
+        GasMembershipPlugin plugin = new GasMembershipPlugin(props::get);
+        assertThrows(IllegalStateException.class, () -> plugin.register(serviceManager));
     }
 }

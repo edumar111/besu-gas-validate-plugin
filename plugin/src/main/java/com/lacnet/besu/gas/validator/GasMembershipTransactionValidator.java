@@ -7,6 +7,7 @@ import com.lacnet.besu.gas.events.RejectionEvent;
 import com.lacnet.besu.gas.events.RejectionEventBus;
 import com.lacnet.besu.gas.model.Tier;
 import com.lacnet.besu.gas.selector.GasMembershipTransactionSelector;
+import com.lacnet.besu.gas.usage.MonthlyQuotaGuard;
 import java.time.Instant;
 import java.util.Optional;
 import org.hyperledger.besu.datatypes.Address;
@@ -51,6 +52,8 @@ public class GasMembershipTransactionValidator implements PluginTransactionPoolV
     private final TierCache cache;
     private final TransactionSimulationService simulator;
     private final RejectionEventBus eventBus;
+    /** Enforcement mensual (Fase 2). {@code null} → solo enforcement per-block (Fase 1). */
+    private final MonthlyQuotaGuard monthlyGuard;
 
     public GasMembershipTransactionValidator(
             final GasMembershipConfig config,
@@ -58,11 +61,22 @@ public class GasMembershipTransactionValidator implements PluginTransactionPoolV
             final TierCache cache,
             final TransactionSimulationService simulator,
             final RejectionEventBus eventBus) {
+        this(config, client, cache, simulator, eventBus, null);
+    }
+
+    public GasMembershipTransactionValidator(
+            final GasMembershipConfig config,
+            final MembershipContractClient client,
+            final TierCache cache,
+            final TransactionSimulationService simulator,
+            final RejectionEventBus eventBus,
+            final MonthlyQuotaGuard monthlyGuard) {
         this.config = config;
         this.client = client;
         this.cache = cache;
         this.simulator = simulator;
         this.eventBus = eventBus;
+        this.monthlyGuard = monthlyGuard;
     }
 
     @Override
@@ -83,6 +97,27 @@ public class GasMembershipTransactionValidator implements PluginTransactionPoolV
             LOG.debug("Validator: rechazo sender={} tier=NONE", sender);
             emit(transaction, sender, tier, GasMembershipTransactionSelector.REASON_NO_MEMBERSHIP, txGasLimit, 0L);
             return Optional.of(GasMembershipTransactionSelector.REASON_NO_MEMBERSHIP);
+        }
+
+        // Enforcement mensual (Fase 2): rechaza upfront cuentas bloqueadas o que exceden la cuota
+        // mensual, dando feedback inmediato en eth_sendRawTransaction.
+        if (monthlyGuard != null) {
+            MonthlyQuotaGuard.Decision decision = monthlyGuard.check(sender, tier, txGasLimit);
+            if (decision == MonthlyQuotaGuard.Decision.BLOCKED) {
+                LOG.debug("Validator: rechazo sender={} tier={}: cuenta bloqueada (cuota mensual)",
+                        sender, tier);
+                emit(transaction, sender, tier,
+                        GasMembershipTransactionSelector.REASON_ACCOUNT_BLOCKED,
+                        txGasLimit, monthlyGuard.monthlyQuotaOf(tier));
+                return Optional.of(GasMembershipTransactionSelector.REASON_ACCOUNT_BLOCKED);
+            }
+            if (decision == MonthlyQuotaGuard.Decision.EXCEEDED) {
+                LOG.debug("Validator: rechazo sender={} tier={}: excede cuota mensual", sender, tier);
+                emit(transaction, sender, tier,
+                        GasMembershipTransactionSelector.REASON_MONTHLY_QUOTA_EXCEEDED,
+                        txGasLimit, monthlyGuard.monthlyQuotaOf(tier));
+                return Optional.of(GasMembershipTransactionSelector.REASON_MONTHLY_QUOTA_EXCEEDED);
+            }
         }
 
         long quota = config.getQuotaPerBlock(tier);

@@ -16,7 +16,7 @@ Controlar el consumo de gas en una **CBDC privada con gas price = 0** mediante u
 | # | Objetivo | Mecanismo | Fase |
 |---|---|---|---|
 | 1 | Anti-spam y fairness por bloque | Cuota máxima de gas/bloque por tier | Fase 1 (**hecho**) |
-| 2 | Monetización del servicio | Cuota mensual contratada por tier | Fase 2 (pendiente) |
+| 2 | Monetización del servicio | Cuota mensual contratada por tier | Fase 2 (**hecho**) |
 
 Por qué los dos mecanismos no se sustituyen entre sí:
 
@@ -76,7 +76,7 @@ limiteEfectivoPremium(t) = 10_000_000 + (350_000_000 - sum(gasUsedByAllSenders e
 En el caso extremo (PREMIUM es el único sender del bloque), una TX puede consumir hasta **350M
 gas en un solo bloque** — equivalente a uno de los contratos Solidity más grandes que existen.
 
-### 3.2 Cuotas mensuales — Fase 2 (planeado)
+### 3.2 Cuotas mensuales — Fase 2 (enforced)
 
 Con block period 2s y mes de 30 días:
 
@@ -256,12 +256,25 @@ ratelimit.membershipContract=0xCONTRACT_ADDRESS
 # === Opcional: solo si se usa el fallback HTTP en vez de TransactionSimulationService ===
 # ratelimit.nodeUrl=http://localhost:4545
 
-# === Cuota mensual (Fase 2 — placeholders, todavía no enforced) ===
-# ratelimit.gas.monthly.basic=648000000000
-# ratelimit.gas.monthly.standard=6480000000000
-# ratelimit.gas.monthly.premium=12960000000000
-# ratelimit.monthlyBlockDurationSeconds=300
+# === Cuota mensual (Fase 2 — enforced) — gas units ===
+ratelimit.gas.monthly.basic=648000000000
+ratelimit.gas.monthly.standard=6480000000000
+ratelimit.gas.monthly.premium=12960000000000
+# Duración del bloqueo por exceso mensual (segundos). Default 300 (5 min ≈ 150 bloques).
+ratelimit.monthlyBlockDurationSeconds=300
+# Cadencia de commit del uso al UsageMeter (bloques). Default 150.
+ratelimit.usage.commitEveryBlocks=150
+# Dirección del UsageMeter on-chain. Si falta, el enforcement mensual corre solo in-memory.
+ratelimit.usage.meterContract=0xUSAGE_METER_ADDRESS
+
+# === Solo en el nodo RECORDER (firma/envía recordUsageBatch) ===
+# ratelimit.usage.recorder=true
+# ratelimit.usage.recorderKey=0xRECORDER_PRIVATE_KEY   # obligatorio si recorder=true
+# ratelimit.usage.recorderGasLimit=8000000
+# (recorder también requiere ratelimit.nodeUrl y ratelimit.usage.meterContract)
 ```
+
+Detalle completo de Fase 2 en [`07-fase-2-cuota-mensual.md`](./07-fase-2-cuota-mensual.md).
 
 **Reglas de validación** (en el constructor del config):
 
@@ -300,27 +313,30 @@ Los defaults de las cuotas y el TTL ya están en el código (los valores que ves
 - Contador mensual on-chain — sin persistencia entre bloques.
 - Mecanismo de pagos / billing.
 
-### Fase 2 — Cuota mensual + bloqueo (planeado)
+### Fase 2 — Cuota mensual + bloqueo (cerrada)
 
-**Componentes nuevos**:
-1. **Contrato `UsageMeter.sol`**: `recordUsage(account, gas, periodId)` y
-   `getRemainingQuota(account)`. Almacena el consumo acumulado por cuenta y período.
-2. **Block listener en el plugin**: post-bloque, recolecta el gas consumido por sender y emite un
-   commit batch al `UsageMeter` (cada N bloques para amortizar costo).
-3. **`BlockedAddressRegistry`**: lista en memoria con TTL 5 min. Cuando una cuenta supera su
-   cuota mensual, se agrega y todas sus TX se rechazan por 5 min.
-4. **Extensión del selector**: antes de evaluar quota per-block, consulta
-   `UsageMeter.getRemainingQuota(sender)`. Si la TX no cabe en el remaining, se rechaza Y se
-   marca como bloqueada.
+Implementada, testeada (168 tests Java + 37 Solidity) y validada E2E contra un nodo Besu real
+(`node/e2e-fase2.sh`). Detalle completo en [`07-fase-2-cuota-mensual.md`](./07-fase-2-cuota-mensual.md).
 
-**Decisiones pendientes para Fase 2**:
+**Componentes**:
+1. **Contrato `UsageMeter.sol`**: `recordUsageBatch(periodId, accounts[], gasDeltas[])` (onlyRecorder,
+   acumulativo) y `getUsage(periodId, account)`. Almacena **solo el consumo** acumulado por
+   `(período, cuenta)` — las cuotas viven en la config del plugin, no on-chain.
+2. **`UsageBlockListener`** (`BlockAddedListener`, corre en **todos** los nodos): por cada bloque
+   cuenta el `gasUsed` real por sender (delta de `cumulativeGasUsed` entre receipts), lo suma al
+   contador mensual y, si excede la cuota, bloquea la cuenta. Cada N bloques dispara el commit.
+3. **`MonthlyUsageTracker`**: contador híbrido `baseline (on-chain, rehidratado lazy) + pendingDelta
+   (in-memory)`. Sobrevive restart leyendo el baseline del `UsageMeter`.
+4. **`BlockedAddressRegistry`**: bloqueo in-memory con TTL 5 min (todas las cuentas salvo WHITELISTED).
+5. **`MonthlyQuotaGuard`**: punto único de decisión consultado por selector y validator **antes** del
+   enforcement per-block. Rechaza cuentas bloqueadas o que excederían la cuota mensual.
+6. **`UsageCommitter`** (solo en el nodo recorder designado): firma (secp256k1/EIP-155) y envía
+   `recordUsageBatch` vía `eth_sendRawTransaction`.
 
-- ¿Cómo se define "el mes"? UTC calendar / 30-day rolling / desde la fecha de alta de la cuenta.
-- Cadencia de commits batch del block listener al `UsageMeter` (cada bloque / cada 100 bloques /
-  cada minuto).
-- ¿El owner del contrato pasa a multisig en producción?
-
-Estas decisiones no bloquean Fase 1.
+**Decisiones tomadas** (ver §9):
+- "El mes" = **mes calendario UTC** (`periodId = year*12 + month0`), sobre el timestamp del bloque.
+- Commit batch **cada 150 bloques** (~5 min), configurable.
+- Un único **nodo recorder** designado commitea (evita N TXs duplicadas en la red multi-validator).
 
 ---
 
@@ -332,20 +348,25 @@ Estas decisiones no bloquean Fase 1.
 | chainId | **650540** | — |
 | Tier NONE | Rechazar TX estrictamente | 1 |
 | Cuotas por bloque | BASIC=500K, STANDARD=5M, PREMIUM=10M + sobrante | 1 |
-| Cuotas mensuales | BASIC=648G, STANDARD=6.48T, PREMIUM=12.96T mín | 2 (cálculo, sin enforce) |
+| Cuotas mensuales | BASIC=648G, STANDARD=6.48T, PREMIUM=12.96T mín | 2 (enforced) |
 | Penalización per-block | Ninguna persistente — `invalidTransient` | 1 |
-| Penalización per-month | Bloqueo 5 min — `invalid` durante ventana | 2 |
+| Penalización per-month | Bloqueo 5 min — `invalidTransient` durante ventana | 2 |
+| Definición de "mes" | Mes calendario UTC (`year*12 + month0`, sobre timestamp del bloque) | 2 |
+| Persistencia del uso mensual | Híbrido: in-memory + commit batch on-chain al `UsageMeter` | 2 |
+| Committer on-chain | Nodo recorder designado, cada 150 bloques (~5 min) | 2 |
+| Cuotas (mensual y per-block) | En config del plugin, NO on-chain (`UsageMeter` solo guarda consumo) | 1/2 |
 | Cache TTL del tier | 50 bloques (~1.6 min) | 1 |
 | Whitelist | On-chain como `Tier.WHITELISTED` (no lista en config) | 1 |
 | Admin del contrato | Owner único (OpenZeppelin `Ownable`) | 1 |
 | Expiración de tiers | No en MVP | 1 |
 | Mecanismo de eth_call | `TransactionSimulationService` interno | 1 |
 
-### Pendientes (no bloquean Fase 1)
+### Pendientes (mejoras futuras, no bloquean nada)
 
-- Definición exacta de "mes" para Fase 2.
-- Esquema de commits batch del block listener al `UsageMeter`.
-- ¿Multisig para owner en producción?
+- **Commit en el boundary de período**: forzar un commit del mes saliente antes del rollover para no
+  perder el pending del mes viejo (ver [`07 §12`](./07-fase-2-cuota-mensual.md#12-pendientes--futuras-mejoras)).
+- Clave del recorder al `SecurityModule`/HSM (hoy en config de un nodo).
+- ¿Multisig para owner del `MembershipRegistry`/`UsageMeter` en producción?
 
 ---
 

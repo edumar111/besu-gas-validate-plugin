@@ -553,7 +553,10 @@ queda totalmente aislado — solo carga lo que copiamos a esa ruta.
   un test de stress es separado.
 - **Comportamiento bajo block reorg** (no esperado en QBFT, pero podría ocurrir si el
   validador único cae). Tampoco esperamos forks.
-- **Cuota mensual** — Fase 2, todavía sin implementar.
+- **Cuota mensual (Fase 2)** — este smoke test cubre solo el enforcement per-block de Fase 1. La
+  validación E2E de la cuota mensual + bloqueo 5 min + commit on-chain del recorder está en un script
+  aparte, [`node/e2e-fase2.sh`](../node/e2e-fase2.sh) (ver
+  [`07-fase-2-cuota-mensual.md`](./07-fase-2-cuota-mensual.md)).
 - **Restart del plugin sin reiniciar Besu** — Besu no soporta hot-reload de plugins. Cualquier
   cambio en config o código del plugin requiere reinicio del nodo.
 

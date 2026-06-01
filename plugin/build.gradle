@@ -41,6 +41,9 @@ dependencies {
     compileOnly "org.hyperledger.besu:besu-evm:${besuVersion}"
     // Tipos Bytes / Bytes32 que aparecen en las interfaces del plugin api.
     compileOnly 'io.consensys.tuweni:tuweni-bytes:2.7.1'
+    // Fase 2: firma secp256k1 + keccak256 del commit del recorder. Provistas por el runtime de
+    // Besu (besu-crypto-algorithms ya está en el classpath del nodo) → no se bundlean.
+    compileOnly "org.hyperledger.besu.internal:besu-crypto-algorithms:${besuVersion}"
 
     implementation 'org.slf4j:slf4j-api:2.0.13'
 
@@ -54,6 +57,7 @@ dependencies {
     testImplementation "org.hyperledger.besu:besu-datatypes:${besuVersion}"
     testImplementation "org.hyperledger.besu:besu-evm:${besuVersion}"
     testImplementation 'io.consensys.tuweni:tuweni-bytes:2.7.1'
+    testImplementation "org.hyperledger.besu.internal:besu-crypto-algorithms:${besuVersion}"
 }
 
 test {

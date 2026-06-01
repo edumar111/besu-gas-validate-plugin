@@ -1,8 +1,9 @@
 # 03 — Contratos y Tests
 
-> `MembershipRegistry.sol` (producción) + `GasBurner.sol` (helper para tests E2E) y su batería
-> de 22 tests Foundry. Incluye los "tripwires cross-stack" que detectan drift entre el plugin
-> Java y el contrato Solidity.
+> `MembershipRegistry.sol` + `UsageMeter.sol` (producción) + `GasBurner.sol` (helper para tests E2E)
+> y su batería de **37 tests Foundry** (18 MembershipRegistry + 4 GasBurner + 15 UsageMeter). Incluye
+> los "tripwires cross-stack" que detectan drift entre el plugin Java y los contratos Solidity.
+> `UsageMeter` (Fase 2) se detalla en § 9 y en [`07-fase-2-cuota-mensual.md`](./07-fase-2-cuota-mensual.md).
 >
 > Si buscás el "qué" del modelo de membresía, ver
 > [`01-requisitos-y-logica.md`](./01-requisitos-y-logica.md). Para integración con el plugin,
@@ -14,7 +15,7 @@
 
 **Stack**: Foundry 1.4.4 (`forge`/`cast`/`anvil`), Solidity 0.8.20, OpenZeppelin Contracts 5.1.0.
 
-**Por qué Foundry y no Hardhat**: los tests son Solidity puro, sin JS runner. Los 22 tests
+**Por qué Foundry y no Hardhat**: los tests son Solidity puro, sin JS runner. Los 37 tests
 corren en **~5 ms** vs ~5-10 s con Hardhat. Para una librería pequeña y bien acotada, no
 necesitamos JS bindings.
 
@@ -170,7 +171,8 @@ contract MembershipRegistry is IMembershipRegistry, Ownable {
 - No registra fechas de alta/baja (no se necesita en Fase 1).
 - No cobra ni acepta pagos — el pricing vive en un backend externo.
 - No tiene `pause()` ni roles avanzados — un solo owner.
-- No tiene contador mensual — eso será otro contrato (`UsageMeter`) en Fase 2.
+- No tiene contador mensual — ese es **otro contrato**, `UsageMeter.sol`, implementado en Fase 2
+  (ver § 9 y [`07-fase-2-cuota-mensual.md`](./07-fase-2-cuota-mensual.md)).
 
 ---
 
@@ -457,19 +459,36 @@ Después, `getTier(...)` devuelve `0` (NONE) y se emite `TierRevoked(account)`.
 
 ---
 
-## 9. Próximos pasos (Fase 2)
+## 9. `UsageMeter.sol` (Fase 2 — implementado)
 
-Cuando se implemente la cuota mensual:
+La cuota mensual se persiste en un **contrato separado** del `MembershipRegistry`. Detalle completo
+del flujo, el contador híbrido y el nodo recorder en
+[`07-fase-2-cuota-mensual.md`](./07-fase-2-cuota-mensual.md).
 
-1. **Nuevo contrato `UsageMeter.sol`**:
-   - `recordUsage(address account, uint256 gas, uint256 periodId)`
-   - `getRemainingQuota(address account) returns (uint256)`
-   - Probablemente con su propio Ownable + un rol "REPORTER" que solo permite al plugin escribir.
-2. **El plugin**: un block listener que tras cada bloque commitea gas usado al `UsageMeter`
-   (batch, no por TX).
-3. **Decisión pendiente**: ¿el `MembershipRegistry` y el `UsageMeter` son dos contratos
-   separados o uno solo? La razón de separarlos es independencia: el upgrade del meter no debe
-   afectar la asignación de tiers (y viceversa).
+```solidity
+interface IUsageMeter {
+    event UsageRecorded(uint256 indexed periodId, address indexed account, uint256 newTotal);
+    event RecorderUpdated(address indexed recorder);
+    function getUsage(uint256 periodId, address account) external view returns (uint256);
+    function recordUsageBatch(uint256 periodId, address[] accounts, uint256[] gasDeltas) external; // onlyRecorder
+    function setRecorder(address recorder) external;  // onlyOwner
+    function recorder() external view returns (address);
+}
+```
+
+Decisiones de diseño:
+
+1. **Guarda consumo, no cuotas**: `getUsage` devuelve el gas acumulado por `(periodId, cuenta)`. Las
+   cuotas viven en la config del plugin (una sola fuente de verdad, igual que las per-block). No hay
+   `getRemainingQuota` on-chain — el plugin computa el remaining contra su config.
+2. **`recordUsageBatch` acumulativo + onlyRecorder**: el plugin (desde un nodo recorder designado)
+   envía solo el delta no commiteado; el contrato lo suma. Rol `recorder` separado del `owner`.
+3. **Contratos separados** (`MembershipRegistry` + `UsageMeter`): independencia — el upgrade del meter
+   no afecta la asignación de tiers ni viceversa.
+
+**Tests cross-stack** en `UsageMeter.t.sol` (15 tests) pinean los selectores que el plugin hardcodea:
+`getUsage(uint256,address)` = `0x44202d6e`, `recordUsageBatch(uint256,address[],uint256[])` =
+`0x1e5092f1`. Si la firma cambia, el test falla y avisa que hay que actualizar el cliente Java.
 
 ---
 
