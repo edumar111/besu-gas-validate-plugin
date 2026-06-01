@@ -7,6 +7,7 @@ import com.lacnet.besu.gas.events.RejectionEvent;
 import com.lacnet.besu.gas.events.RejectionEventBus;
 import com.lacnet.besu.gas.model.Tier;
 import com.lacnet.besu.gas.tracker.BlockGasTracker;
+import com.lacnet.besu.gas.usage.MonthlyQuotaGuard;
 import java.time.Instant;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Hash;
@@ -52,12 +53,17 @@ public class GasMembershipTransactionSelector implements PluginTransactionSelect
     public static final String REASON_NO_MEMBERSHIP = "sender has no active membership";
     public static final String REASON_BLOCK_QUOTA_EXCEEDED = "excedió límite de gas en el bloque";
     public static final String REASON_TX_EXCEEDS_TIER_QUOTA = "tx gasLimit exceeds tier quota";
+    public static final String REASON_ACCOUNT_BLOCKED =
+            "account temporarily blocked: monthly gas quota exceeded";
+    public static final String REASON_MONTHLY_QUOTA_EXCEEDED = "monthly gas quota exceeded";
 
     private final GasMembershipConfig config;
     private final MembershipContractClient client;
     private final TierCache cache;
     private final BlockGasTracker tracker;
     private final RejectionEventBus eventBus;
+    /** Enforcement mensual (Fase 2). {@code null} → solo enforcement per-block (Fase 1). */
+    private final MonthlyQuotaGuard monthlyGuard;
 
     public GasMembershipTransactionSelector(
             final GasMembershipConfig config,
@@ -65,11 +71,22 @@ public class GasMembershipTransactionSelector implements PluginTransactionSelect
             final TierCache cache,
             final BlockGasTracker tracker,
             final RejectionEventBus eventBus) {
+        this(config, client, cache, tracker, eventBus, null);
+    }
+
+    public GasMembershipTransactionSelector(
+            final GasMembershipConfig config,
+            final MembershipContractClient client,
+            final TierCache cache,
+            final BlockGasTracker tracker,
+            final RejectionEventBus eventBus,
+            final MonthlyQuotaGuard monthlyGuard) {
         this.config = config;
         this.client = client;
         this.cache = cache;
         this.tracker = tracker;
         this.eventBus = eventBus;
+        this.monthlyGuard = monthlyGuard;
     }
 
     @Override
@@ -93,6 +110,25 @@ public class GasMembershipTransactionSelector implements PluginTransactionSelect
             LOG.debug("Rechazo sender={} tier=NONE", sender);
             emit(tx.getHash(), sender, tier, REASON_NO_MEMBERSHIP, blockNumber, txGasLimit, 0L, 0L);
             return TransactionSelectionResult.invalid(REASON_NO_MEMBERSHIP);
+        }
+
+        // Enforcement mensual (Fase 2) antes del per-block. Transient: el bloqueo dura ~5 min y la
+        // cuota mensual se resetea el mes próximo, así que la TX puede reintentarse — no la
+        // descartamos del pool.
+        if (monthlyGuard != null) {
+            MonthlyQuotaGuard.Decision decision = monthlyGuard.check(sender, tier, txGasLimit);
+            if (decision == MonthlyQuotaGuard.Decision.BLOCKED) {
+                LOG.debug("Rechazo sender={} tier={}: cuenta bloqueada (cuota mensual)", sender, tier);
+                emit(tx.getHash(), sender, tier, REASON_ACCOUNT_BLOCKED, blockNumber, txGasLimit,
+                        tracker.getUsed(sender), monthlyGuard.monthlyQuotaOf(tier));
+                return TransactionSelectionResult.invalidTransient(REASON_ACCOUNT_BLOCKED);
+            }
+            if (decision == MonthlyQuotaGuard.Decision.EXCEEDED) {
+                LOG.debug("Rechazo sender={} tier={}: excede cuota mensual", sender, tier);
+                emit(tx.getHash(), sender, tier, REASON_MONTHLY_QUOTA_EXCEEDED, blockNumber, txGasLimit,
+                        tracker.getUsed(sender), monthlyGuard.monthlyQuotaOf(tier));
+                return TransactionSelectionResult.invalidTransient(REASON_MONTHLY_QUOTA_EXCEEDED);
+            }
         }
 
         long quota = config.getQuotaPerBlock(tier);

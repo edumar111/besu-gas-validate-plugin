@@ -5,8 +5,9 @@
 > CBDC privada con gas price = 0 sobre QBFT.
 >
 > **Estado**: Fase 1 cerrada (2026-05-21) + Fase 1.5 (validator al admitir al pool) +
-> Fase 1.6 (notificaciones de rechazo vía JSON-RPC custom, 2026-05-28). 82 tests Java +
-> 22 Solidity verdes.
+> Fase 1.6 (notificaciones de rechazo vía JSON-RPC custom, 2026-05-28) +
+> **Fase 2 (cuota mensual on-chain + bloqueo 5 min, 2026-05-31)**. 168 tests Java +
+> 37 Solidity verdes.
 
 ---
 
@@ -20,6 +21,7 @@
 | 4 | [Smoke test end-to-end](./04-smoke-test-e2e.md) | Validación E2E con `cast`: deploy del contrato, asignación de tiers, envío de TXs reales con el plugin activo. Detalla cada uno de los 8 casos cubiertos. |
 | 5 | [Fase 1.5: validator y `pruebas/`](./05-fase-1.5-validator-y-pruebas.md) | Plugins implementados (clases Java y interfaces Besu), división de responsabilidades selector/validator, cambios en el selector y `start-besu.sh`, scripts Hardhat en `pruebas/`. |
 | 6 | [Fase 1.6: notificaciones de rechazo](./06-fase-1.6-notificaciones.md) | Métodos JSON-RPC custom (`gasMembership_*`) para que el cliente sepa por qué/cuándo se rechazó una TX. `RejectionEventBus`, el gotcha del namespace en `rpc-http-api`, script de saturación per-block. |
+| 7 | [Fase 2: cuota mensual + bloqueo](./07-fase-2-cuota-mensual.md) | Enforcement mensual: `UsageMeter.sol`, contador híbrido in-memory + commit on-chain, `UsageBlockListener`, bloqueo de 5 min, nodo recorder que firma `recordUsageBatch`, RPC `gasMembership_getMonthlyUsage`. |
 
 ---
 
@@ -44,7 +46,7 @@ El tier por cuenta vive on-chain en un contrato `MembershipRegistry`. El plugin 
 | **Fase 1** | **Cerrada** (commit `442195b`) | Enforce cuota por bloque por tier | `PluginTransactionSelector` | Al armar bloque |
 | **Fase 1.5** | **Cerrada** (2026-05-27) | Rechazo upfront de casos imposibles (NONE, `txGasLimit > tierQuota`) | `PluginTransactionPoolValidator` | Al `eth_sendRawTransaction` |
 | **Fase 1.6** | **Cerrada** (2026-05-28) | Notifica al cliente el motivo/bloque del rechazo | `RpcEndpointService` (`gasMembership_*`) | Polling del cliente |
-| Fase 2 | Pendiente | Cuota mensual on-chain | `UsageMeter.sol` + block listener | Bloqueo cuenta 5 min |
+| **Fase 2** | **Cerrada** (2026-05-31) | Cuota mensual on-chain + bloqueo 5 min | `UsageMeter.sol` + `BlockAddedListener` + nodo recorder | Bloqueo cuenta 5 min |
 
 Detalle de la diferencia: la cuota por bloque protege la red en tiempo real (anti-spam, fairness). La cuota mensual hace cumplir el SLA del plan pago. Son problemas distintos y se resuelven con mecanismos distintos. Ver [§ Roadmap en requisitos](./01-requisitos-y-logica.md#estrategia-en-dos-fases) y [Fase 1.5 detallada](./05-fase-1.5-validator-y-pruebas.md).
 
@@ -89,10 +91,10 @@ Requisitos previos (macOS):
 Verificar que todo compila y testea:
 
 ```bash
-# Java unit tests (82 tests: selector + validator + cache + tracker + client + bus + plugin)
+# Java unit tests (168 tests: Fase 1 + validator + cache + tracker + bus + plugin + Fase 2 usage)
 cd plugin && ./gradlew test
 
-# Solidity tests (22 tests: 18 MembershipRegistry + 4 GasBurner)
+# Solidity tests (37 tests: 18 MembershipRegistry + 4 GasBurner + 15 UsageMeter)
 cd contracts && forge test
 
 # Smoke test end-to-end con cast/forge (arranca/detiene Besu dos veces, ~3 min total)
@@ -108,7 +110,7 @@ Detalle de cada paso en [`04-smoke-test-e2e.md`](./04-smoke-test-e2e.md).
 
 ## Cuotas de un vistazo
 
-| Tier | Por bloque (Fase 1, enforced) | Por mes (Fase 2, planeado) |
+| Tier | Por bloque (Fase 1, enforced) | Por mes (Fase 2, enforced) |
 |---|---|---|
 | `NONE` | TX rechazada | TX rechazada |
 | `BASIC` | 500K gas | 648 G gas (6.48 × 10¹¹) |

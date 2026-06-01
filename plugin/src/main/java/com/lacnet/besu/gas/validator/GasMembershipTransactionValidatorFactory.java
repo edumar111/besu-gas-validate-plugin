@@ -4,6 +4,7 @@ import com.lacnet.besu.gas.cache.TierCache;
 import com.lacnet.besu.gas.client.MembershipContractClient;
 import com.lacnet.besu.gas.config.GasMembershipConfig;
 import com.lacnet.besu.gas.events.RejectionEventBus;
+import com.lacnet.besu.gas.usage.MonthlyQuotaGuard;
 import org.hyperledger.besu.plugin.services.TransactionSimulationService;
 import org.hyperledger.besu.plugin.services.txvalidator.PluginTransactionPoolValidator;
 import org.hyperledger.besu.plugin.services.txvalidator.PluginTransactionPoolValidatorFactory;
@@ -22,6 +23,8 @@ public class GasMembershipTransactionValidatorFactory implements PluginTransacti
     private final TierCache cache;
     private final TransactionSimulationService simulator;
     private final RejectionEventBus eventBus;
+    /** Enforcement mensual (Fase 2). {@code null} → solo per-block (Fase 1). */
+    private final MonthlyQuotaGuard monthlyGuard;
 
     public GasMembershipTransactionValidatorFactory(
             final GasMembershipConfig config,
@@ -29,15 +32,26 @@ public class GasMembershipTransactionValidatorFactory implements PluginTransacti
             final TierCache cache,
             final TransactionSimulationService simulator,
             final RejectionEventBus eventBus) {
+        this(config, client, cache, simulator, eventBus, null);
+    }
+
+    public GasMembershipTransactionValidatorFactory(
+            final GasMembershipConfig config,
+            final MembershipContractClient client,
+            final TierCache cache,
+            final TransactionSimulationService simulator,
+            final RejectionEventBus eventBus,
+            final MonthlyQuotaGuard monthlyGuard) {
         this.config = config;
         this.client = client;
         this.cache = cache;
         this.simulator = simulator;
         this.eventBus = eventBus;
+        this.monthlyGuard = monthlyGuard;
     }
 
     @Override
     public PluginTransactionPoolValidator createTransactionValidator() {
-        return new GasMembershipTransactionValidator(config, client, cache, simulator, eventBus);
+        return new GasMembershipTransactionValidator(config, client, cache, simulator, eventBus, monthlyGuard);
     }
 }

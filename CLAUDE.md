@@ -5,15 +5,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Repository status
 
 **Fase 1 cerrada y validada end-to-end.** El plugin de gas + el contrato `MembershipRegistry` están
-implementados, testeados (82 tests Java + 22 tests Solidity verdes) y validados con un smoke test
+implementados, testeados (168 tests Java + 37 tests Solidity verdes) y validados con un smoke test
 E2E de 8/8 casos. **Fase 1.5** suma un `PluginTransactionPoolValidator` que rechaza upfront
 (en `eth_sendRawTransaction`) las TXs que nunca podrían entrar a ningún bloque. **Fase 1.6** suma
 métodos JSON-RPC custom (`gasMembership_*`) para notificar al cliente el motivo/bloque del rechazo.
+**Fase 2** suma cuota mensual on-chain (`UsageMeter.sol`) + bloqueo de 5 min: un `BlockAddedListener`
+contabiliza el `gasUsed` real por cuenta en todos los nodos, y un nodo "recorder" designado firma y
+commitea el uso al contrato cada N bloques (`eth_sendRawTransaction`).
 
 | Carpeta | Qué hay |
 |---|---|
-| `plugin/` | Plugin Java (Gradle 8.10.2, Java 21, Besu 25.8.0). JAR shadowed listo en `build/libs/`. Selector (Fase 1) + validator (Fase 1.5) + RPC custom (Fase 1.6). |
-| `contracts/` | `MembershipRegistry.sol` (producción) + `GasBurner.sol` (helper para tests E2E) con Foundry + OpenZeppelin 5.1.0. Submódulos en `lib/` (NO commiteados — `forge install` para reinstalar). |
+| `plugin/` | Plugin Java (Gradle 8.10.2, Java 21, Besu 25.8.0). JAR shadowed listo en `build/libs/`. Selector (Fase 1) + validator (Fase 1.5) + RPC custom (Fase 1.6) + enforcement mensual + committer (Fase 2, paquete `usage/`). |
+| `contracts/` | `MembershipRegistry.sol` + `UsageMeter.sol` (producción) + `GasBurner.sol` (helper para tests E2E) con Foundry + OpenZeppelin 5.1.0. Submódulos en `lib/` (NO commiteados — `forge install` para reinstalar). |
 | `node/` | Besu 25.8-falcon QBFT local con `start-besu.sh` y `smoke-test.sh`. |
 | `pruebas/` | Scripts Hardhat + ethers v6 para deployar contratos desde una cuenta BASIC (`deploy:basic` caso positivo, `deploy:exceed` caso negativo que valida que el validator rechaza). Ver `pruebas/README.md`. |
 | `docs/` | Documentación completa en 5 archivos — empezar por `docs/README.md`. |
@@ -27,6 +30,7 @@ La documentación detallada vive en `docs/` y está organizada por tema:
 - **[`docs/02-arquitectura.md`](docs/02-arquitectura.md)** — Componentes Java, flujo del selector, gas accounting, concurrencia, dependencias. El "cómo".
 - **[`docs/03-contratos.md`](docs/03-contratos.md)** — `MembershipRegistry` + tests Foundry, incluyendo los tripwires cross-stack.
 - **[`docs/04-smoke-test-e2e.md`](docs/04-smoke-test-e2e.md)** — Test end-to-end al detalle: 8 casos con resultados verificados.
+- **[`docs/07-fase-2-cuota-mensual.md`](docs/07-fase-2-cuota-mensual.md)** — Cuota mensual on-chain + bloqueo 5 min: `UsageMeter`, contador híbrido, block listener, nodo recorder, RPC `getMonthlyUsage`.
 
 **No dupliques info entre `CLAUDE.md` y `docs/`** — los docs son la fuente de verdad. Acá solo
 queda lo que ayuda a Claude Code a navegar el repo y evitar errores comunes.
@@ -63,6 +67,22 @@ Post-processing → BlockGasTracker.add(sender, gasUsed REAL)
 Cualquier rechazo (validator o selector) → RejectionEventBus.emit(...)
                                               └── gasMembership_getRejection(txHash)  ← Fase 1.6
                                               └── gasMembership_listRejectionsBySender(sender)
+
+── Fase 2 (cuota mensual): el validator y el selector consultan MonthlyQuotaGuard ANTES del
+   enforcement per-block (BLOCKED/EXCEEDED → reject; EXCEEDED además bloquea la cuenta 5 min).
+
+Bloque añadido (TODOS los nodos) → [UsageBlockListener.onBlockAdded]  ← BlockAddedListener
+       ├── PeriodClock.periodId(timestamp) → MonthlyUsageTracker.rollTo
+       ├── por TX: gasUsed = Δ cumulativeGasUsed → MonthlyUsageTracker.addUsage(sender, gasUsed)
+       ├── si cumulative > cuotaMensual → BlockedAddressRegistry.block(sender, 5min)
+       └── cada N bloques → CommitTrigger
+                              └── (solo nodo recorder) UsageCommitter:
+                                    snapshotPending → recordUsageBatch firmado (secp256k1)
+                                    → eth_sendRawTransaction → UsageMeter on-chain
+                                    → applyCommitted (pending → baseline)
+
+MonthlyUsageTracker baseline ← UsageMeterClient.getUsage (eth_call, rehidrata tras restart)
+gasMembership_getMonthlyUsage(account) → {periodId, used, blocked, blockedUntil}
 ```
 
 Detalle visual y de cada componente en `docs/02-arquitectura.md`. El validator y el
@@ -99,6 +119,32 @@ Verificado por un test Solidity (`test_GetTierSelectorMatchPluginHardcoded` en
 duplicado entre `Tier.java` y `IMembershipRegistry.sol`. Dos tests (uno por lado) verifican
 que los enums están sincronizados.
 
+**Selectores cross-stack de Fase 2**: `getUsage(uint256,address)` = `0x44202d6e` (hardcoded en
+`UsageMeterClient`) y `recordUsageBatch(uint256,address[],uint256[])` = `0x1e5092f1` (hardcoded en
+`RecordUsageTxEncoder`). Pineados por `test_GetUsageSelectorMatchPluginHardcoded` y
+`test_RecordUsageBatchSelectorMatchPluginHardcoded` en `UsageMeter.t.sol`.
+
+**`periodId` = mes calendario UTC** = `year*12 + month0`, computado sobre el **timestamp del
+bloque** (no wall-clock) para ser consenso-consistente entre nodos. El bloqueo de 5 min sí usa
+wall-clock porque es una penalización local. Ver `PeriodClock`.
+
+**Crypto de Fase 2 NO se bundlea**: la firma del commit del recorder usa `besu-crypto-algorithms`
+(groupId `org.hyperledger.besu.internal`) + `Hash.keccak256`, ambos `compileOnly` — ya están en el
+runtime de Besu. El JAR shadowed NO debe contener `org/hyperledger/besu/crypto` ni `org/bouncycastle`.
+
+**El nodo recorder debe estar WHITELISTED** en el `MembershipRegistry`, o sus propias TX
+`recordUsageBatch` serían rechazadas por este mismo plugin. Solo UN nodo lleva
+`ratelimit.usage.recorder=true` (evita N commits duplicados en la red multi-validator).
+
+**Fase 2 degrada elegante**: si `BesuEvents` no está en el runtime, el enforcement mensual queda
+desactivado (warning en logs) y el plugin opera solo con per-block. No crashea.
+
+**`BesuEvents`/`BlockchainService` solo existen en `start()`, NO en `register()`** (gotcha de Besu
+descubierto en el E2E). Por eso `GasMembershipPlugin` construye el estado de Fase 2 (tracker, guard)
+en `register()` — lo necesitan las factories — pero registra el `BlockAddedListener` y el committer
+recién en `start()` (`startMonthlyEnforcement()`). Si pedís `BesuEvents` en `register()` siempre da
+empty y Fase 2 queda silenciosamente desactivada.
+
 **Namespace RPC custom debe habilitarse en `config.toml`** (Fase 1.6): los métodos
 `gasMembership_*` no se exponen a menos que `GASMEMBERSHIP` esté en `rpc-http-api` y
 `rpc-ws-api`. Besu matchea el namespace case-insensitive por prefijo
@@ -120,10 +166,10 @@ Foundry, pero no debe deployarse en chains productivas.
 ## Comandos típicos
 
 ```bash
-# Java unit tests (82 tests: selector + validator + cache + tracker + client + bus + plugin)
+# Java unit tests (168 tests: Fase 1 selector/validator/cache/tracker/bus/plugin + Fase 2 usage/)
 cd plugin && ./gradlew test
 
-# Solidity tests (22 tests: 18 MembershipRegistry + 4 GasBurner)
+# Solidity tests (37 tests: 18 MembershipRegistry + 4 GasBurner + 15 UsageMeter)
 cd contracts && forge test
 
 # Build del JAR del plugin
@@ -143,21 +189,27 @@ cd contracts && forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 \
 
 ## Lo que está pendiente
 
-Fase 2 — cuota mensual on-chain + bloqueo 5 min. Componentes nuevos:
+Fase 2 **implementada, testeada (168 Java + 37 Solidity verdes) y validada E2E** contra un nodo Besu
+real (`node/e2e-fase2.sh`): Stage A verifica el rechazo `monthly gas quota exceeded` + bloqueo 5 min
++ `gasMembership_getMonthlyUsage`; Stage B verifica que el nodo recorder firma y envía
+`recordUsageBatch`, y que `UsageMeter.getUsage` on-chain refleja el uso (persistencia). El smoke test
+original (`node/smoke-test.sh`) sigue cubriendo solo Fase 1.
 
-- `UsageMeter.sol` (contador acumulado on-chain por cuenta).
-- Block listener Java que tras cada bloque commitea uso al `UsageMeter` (batch).
-- `BlockedAddressRegistry` (TTL 5 min, en memoria).
-
-Decisiones pendientes (no bloquean nada): definición exacta de "mes", cadencia de commits batch,
-multisig para owner en producción. Detalle en `docs/01-requisitos-y-logica.md § 9 Pendientes`.
+Mejoras conocidas (documentadas en `docs/07-fase-2-cuota-mensual.md § 12`):
+- **Commit en el boundary de período**: forzar un commit del mes saliente antes del `rollTo` para no
+  perder el pending del mes viejo.
+- **Clave del recorder al `SecurityModule`/HSM** (hoy en config de un nodo).
+- **Multisig** para el owner del `UsageMeter` y del `MembershipRegistry` en producción.
 
 ## When implementing
 
 - **No bundlear deps de Besu**: `compileOnly` para `besu-plugin-api`, `besu-datatypes`, `besu-evm`.
 - **No tocar `tuweni-bytes` versión** sin verificar que el binario local de Besu use la misma —
   los tipos cruzan el plugin boundary.
-- **No hardcodear el contract address** en código — siempre via `ratelimit.membershipContract`.
-- **No mover el selector hardcoded** sin actualizar `test_GetTierSelectorMatchPluginHardcoded`.
+- **No hardcodear el contract address** en código — siempre via `ratelimit.membershipContract`
+  (y `ratelimit.usage.meterContract` para el `UsageMeter`).
+- **No mover los selectores hardcoded** sin actualizar sus tests Solidity: `getTier` →
+  `test_GetTierSelectorMatchPluginHardcoded`; `getUsage`/`recordUsageBatch` →
+  `test_*SelectorMatchPluginHardcoded` en `UsageMeter.t.sol`.
 - **`/usr/bin/curl`, `/usr/bin/grep`, etc.**: en scripts que se invocan desde subshells (como
   los `for` con eval) usar rutas absolutas para evitar problemas de PATH.
