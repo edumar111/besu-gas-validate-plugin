@@ -75,9 +75,16 @@ plugin/
     │   │   ├── client/MembershipContractClient.java  ← eth_call → Tier
     │   │   ├── cache/TierCache.java             ← Map<Address,Tier> + TTL bloques
     │   │   ├── tracker/BlockGasTracker.java     ← gas/sender por bloque
+    │   │   ├── client/                          ← MembershipContractClient + UsageMeterClient + ReadOnlyCall
     │   │   ├── events/                                               ← Fase 1.6
     │   │   │   ├── RejectionEvent.java          ← record del rechazo (incl. Source)
     │   │   │   └── RejectionEventBus.java       ← cache TTL+bounded de rechazos
+    │   │   ├── usage/                                                ← Fase 2
+    │   │   │   ├── PeriodClock / MonthlyUsageTracker / BlockedAddressRegistry
+    │   │   │   ├── MonthlyQuotaGuard            ← decisión mensual compartida selector/validator
+    │   │   │   ├── UsageBlockListener           ← BlockAddedListener (cuenta uso + bloqueo + commits)
+    │   │   │   ├── UsageCommitter + Rlp + RecordUsageTxEncoder + Secp256k1RecorderSigner + JsonRpcRecorderRpc
+    │   │   │   └── (detalle completo en docs/07-fase-2-cuota-mensual.md)
     │   │   ├── selector/
     │   │   │   ├── GasMembershipTransactionSelector.java        ← decisión al armar bloque
     │   │   │   └── GasMembershipTransactionSelectorFactory.java ← devuelve selectors
@@ -87,7 +94,7 @@ plugin/
     │   └── resources/META-INF/services/
     │       └── org.hyperledger.besu.plugin.BesuPlugin   ← SPI: 1 línea con FQN
     └── test/java/com/lacnet/besu/gas/                   ← espejo de main/
-        └── (82 tests JUnit 5 + Mockito)
+        └── (168 tests JUnit 5 + Mockito)
 ```
 
 ---
@@ -103,18 +110,21 @@ Implementa `org.hyperledger.besu.plugin.BesuPlugin`. Es lo que Besu descubre por
 
 1. En `register(ServiceManager)`:
    - Carga el config desde system properties (falla early si está mal).
-   - Pide al `ServiceManager` los servicios requeridos:
+   - Pide al `ServiceManager` los servicios disponibles **en register**:
      - `TransactionSimulationService` (para `eth_call` interno).
      - `TransactionSelectionService` (para registrar el selector factory).
      - `TransactionPoolValidatorService` (para registrar el validator factory — Fase 1.5).
-     - `RpcEndpointService` (para registrar los métodos `gasMembership_*` — Fase 1.6).
+     - `RpcEndpointService` (para registrar los métodos `gasMembership_*` — Fase 1.6 + 2).
      - Si cualquiera no está disponible → `IllegalStateException` con mensaje preciso.
    - Construye el grafo: `MembershipContractClient` + `TierCache` + `BlockGasTracker` + `RejectionEventBus` + selector factory + validator factory. **`TierCache` y `RejectionEventBus` se comparten entre selector y validator** — un solo lookup al contrato por `(sender, bloque)` sirve a ambos, y ambos escriben los rechazos al mismo bus.
+   - **Fase 2**: construye el estado del enforcement mensual (`MonthlyUsageTracker`, `BlockedAddressRegistry`, `MonthlyQuotaGuard`) y lo inyecta a las factories. El `MonthlyQuotaGuard` ya puede vivir acá porque selector/validator lo consultan recién al evaluar TXs (post-start).
    - Registra factories y métodos RPC:
      - `selection.registerPluginTransactionSelectorFactory(selectorFactory)`
      - `validation.registerPluginTransactionValidatorFactory(validatorFactory)`
-     - `rpc.registerRPCEndpoint("gasMembership", "getRejection", ...)` y `"listRejectionsBySender"` (ver [`06-fase-1.6-notificaciones.md`](./06-fase-1.6-notificaciones.md)).
-2. `start()`, `stop()` — solo logs informativos. Todo el cableado vive en `register`.
+     - `rpc.registerRPCEndpoint("gasMembership", "getRejection" | "listRejectionsBySender" | "getMonthlyUsage", ...)`.
+2. En `start()`:
+   - **Completa el wiring de Fase 2**: pide `BesuEvents` y `BlockchainService` (que **solo existen en `start()`, no en `register()`** — gotcha de Besu) y registra el `UsageBlockListener` (`addBlockAddedListener`). En el nodo recorder, además construye el `UsageCommitter`. Si `BesuEvents` no está, Fase 2 degrada a per-block con un warning (no crashea).
+   - `stop()` — solo logs informativos.
 
 **Diseño clave — fail-fast en arranque**: si la config está mal (falta el contractAddress,
 quotas negativas, TTL inválido), el plugin **crashea visible** en arranque. La alternativa
@@ -607,7 +617,7 @@ Si NO ves estos mensajes, el plugin no se cargó — ver
 
 ## 7. Tests unitarios
 
-**82 tests totales**, organizados por componente:
+**168 tests totales** (82 de Fase 1/1.5/1.6 + 86 de Fase 2), organizados por componente:
 
 | Test class | Tests | Foco |
 |---|---|---|
@@ -619,7 +629,8 @@ Si NO ves estos mensajes, el plugin no se cargó — ver
 | `RejectionEventBusTest` | 7 | roundtrip, sobrescritura por hash, filtro+orden por sender, clamp de limit, expiración TTL, cap por inserción (Fase 1.6) |
 | `GasMembershipTransactionSelectorTest` | 16 | Las 6 ramas del flujo + cambio de bloque + post-processing + cache hit + split invalid/transient + emisión al bus |
 | `GasMembershipTransactionValidatorTest` | 9 | WHITELISTED/PREMIUM/NONE/BASIC>quota/BASIC≤quota/STANDARD>quota/cache hit (Fase 1.5) + emisión al bus (Fase 1.6) |
-| `GasMembershipPluginTest` | 9 | SPI discovery, register() happy path + 5 paths de error (servicios ausentes) + registro de los 2 métodos RPC |
+| `GasMembershipPluginTest` | 11 | SPI discovery, register() happy path + 5 paths de error + registro de los 3 métodos RPC + wiring de Fase 2 en start() |
+| **Fase 2 (`usage/` + `client/`)** | **~85** | `PeriodClock` (bordes de mes UTC), `MonthlyUsageTracker` (baseline+delta, rollover, concurrencia), `BlockedAddressRegistry` (TTL), `UsageBlockListener` (conteo por delta de receipts + bloqueo + cadencia), `MonthlyQuotaGuard` + integración selector/validator, `Rlp` (vectores Yellow Paper), `RecordUsageTxEncoder` (ABI + EIP-155), `Secp256k1RecorderSigner` (derivación address + firma), `UsageCommitter`, `UsageMeterClient`. Detalle en [`07`](./07-fase-2-cuota-mensual.md). |
 
 ### Tests con valor especial
 
@@ -634,7 +645,7 @@ Si NO ves estos mensajes, el plugin no se cargó — ver
 ```bash
 cd plugin
 
-# Suite completa (82 tests, ~5s con caché)
+# Suite completa (168 tests, ~5s con caché)
 ./gradlew test
 
 # Una clase específica
